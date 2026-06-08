@@ -47,6 +47,78 @@ function absoluteUrl(link, env) {
   }
 }
 
+function looksPlayableLink(value) {
+  const text = String(value || "").trim();
+  return /(?:\.m3u8|\.mp4|\/m3u8\/|\/h5\/m3u8\/|\/vod\/|\/video\/|\/media\/|\/link\/)/i.test(text);
+}
+
+function collectPlayableLinks(value, bucket = [], trail = []) {
+  if (!value || bucket.length >= 16) return bucket;
+  if (typeof value === "string") {
+    const keyHint = trail.join(".").toLowerCase();
+    if (looksPlayableLink(value) && /play|backup|m3u8|mp4|video|media|source|src|url|link|file/.test(keyHint)) {
+      bucket.push({ key: keyHint, url: value.trim() });
+    }
+    return bucket;
+  }
+  if (Array.isArray(value)) {
+    value.slice(0, 20).forEach((item, index) => collectPlayableLinks(item, bucket, [...trail, String(index)]));
+    return bucket;
+  }
+  if (typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      if (bucket.length >= 16) break;
+      collectPlayableLinks(item, bucket, [...trail, key]);
+    }
+  }
+  return bucket;
+}
+
+function normalizeFullDetail(detail = null) {
+  if (!detail || typeof detail !== "object") return detail;
+  const links = collectPlayableLinks(detail);
+  const directPlay = [
+    detail.play_link,
+    detail.playLink,
+    detail.play_url,
+    detail.playUrl,
+    detail.m3u8,
+    detail.m3u8_url,
+    detail.m3u8Url,
+    detail.video_url,
+    detail.videoUrl,
+    detail.media_url,
+    detail.mediaUrl,
+    detail.url,
+    detail.src,
+    detail.source,
+    detail.file
+  ].find(looksPlayableLink);
+  const directBackup = [
+    detail.backup_link,
+    detail.backupLink,
+    detail.backup_url,
+    detail.backupUrl,
+    detail.second_play_link,
+    detail.secondPlayLink
+  ].find(looksPlayableLink);
+  const playLink = detail.play_link || directPlay || links.find((item) => /play|m3u8|mp4|video|media|source|src|url|link|file/.test(item.key))?.url || "";
+  const backupLink = detail.backup_link || directBackup || links.find((item) => /backup|second|spare|mirror/.test(item.key))?.url || "";
+  return {
+    ...detail,
+    play_link: playLink || detail.play_link || "",
+    backup_link: backupLink || detail.backup_link || ""
+  };
+}
+
+function normalizeFullSummary(summary = {}, detail = null) {
+  return {
+    ...summary,
+    playLink: summary.playLink || detail?.play_link || "",
+    backupLink: summary.backupLink || detail?.backup_link || ""
+  };
+}
+
 function isEnabled(value, fallback = false) {
   if (value === undefined || value === null || value === "") return fallback;
   return /^(1|true|yes|on)$/i.test(String(value));
