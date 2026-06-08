@@ -633,13 +633,15 @@ async function fullDetail(env, ctx, body = {}) {
   for (const account of candidates) {
     const cached = await cacheGet(env, account.id, movieId);
     if (cached) {
+      const cachedDetail = normalizeFullDetail(cached.detail);
+      const cachedSummary = normalizeFullSummary(cached.summary, cachedDetail);
       return {
         ok: true,
-        detail: cached.detail,
-        data: cached.detail,
-        summary: { ...cached.summary, cacheHit: true, remote: true, rotation: { accountId: account.id, tried: errors.length + 1 } },
+        detail: cachedDetail,
+        data: cachedDetail,
+        summary: { ...cachedSummary, cacheHit: true, remote: true, rotation: { accountId: account.id, tried: errors.length + 1 } },
         account: publicAccount(account),
-        state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [cached.summary] }
+        state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [cachedSummary] }
       };
     }
 
@@ -649,11 +651,11 @@ async function fullDetail(env, ctx, body = {}) {
     try {
       verified = await acquireAccountSession(account, env, bootstrap);
       await updateAccountAfterVerify(env, account, verified);
-      detail = await apiRequest("/movie/detail", { id: movieId }, verified, env);
+      detail = normalizeFullDetail(await apiRequest("/movie/detail", { id: movieId }, verified, env));
       if (detail?.has_buy !== "y" && detail?.layer_type === "money" && Number(detail?.money || 0) > 0) {
         action = "buy_then_full_detail";
         await apiRequest("/movie/doBuy", { id: movieId }, verified, env);
-        detail = await apiRequest("/movie/detail", { id: movieId }, verified, env);
+        detail = normalizeFullDetail(await apiRequest("/movie/detail", { id: movieId }, verified, env));
       }
     } catch (err) {
       const message = err?.message || String(err);
