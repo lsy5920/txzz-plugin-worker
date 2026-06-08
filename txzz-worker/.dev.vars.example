@@ -1,0 +1,8 @@
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=replace-with-service-role-key
+TXZZ_API_AES_KEY=replace-with-target-api-aes-key
+TXZZ_CREDENTIAL_KEY=replace-with-random-credential-encryption-secret
+TXZZ_ADMIN_TOKEN=replace-with-random-admin-token
+TXZZ_CLIENT_TOKEN=replace-with-random-client-token
+TXZZ_PROXY_SIGNING_KEY=replace-with-random-proxy-signing-secret
+TXZZ_SEED_ACCOUNTS_JSON=[{"id":"full-lsyhook","label":"lsyhook full access","username":"lsyhook","password":"replace-locally","notes":"authorized CTF full-access seed account"}]

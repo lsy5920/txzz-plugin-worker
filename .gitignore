@@ -1,0 +1,9 @@
+node_modules/
+txzz-worker/node_modules/
+txzz-worker/.dev.vars
+.env
+.env.*
+*.log
+evidence/
+*.zip
+.chrome-cdp-profile/

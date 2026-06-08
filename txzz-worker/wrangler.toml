@@ -1,0 +1,20 @@
+name = "txzz-secure-pool"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+
+[vars]
+TXZZ_TARGET_BASE_URL = "https://txh068.com"
+TXZZ_API_VERSION = "4.76"
+TXZZ_API_SOURCE = "Apple Computer, Inc."
+TXZZ_CACHE_TTL_SECONDS = "600"
+TXZZ_PROXY_MEDIA = "false"
+
+# Set these with `wrangler secret put`, never commit real values:
+# SUPABASE_URL
+# SUPABASE_SERVICE_ROLE_KEY
+# TXZZ_API_AES_KEY
+# TXZZ_CREDENTIAL_KEY
+# TXZZ_ADMIN_TOKEN
+# TXZZ_CLIENT_TOKEN
+# TXZZ_PROXY_SIGNING_KEY
+# TXZZ_SEED_ACCOUNTS_JSON
