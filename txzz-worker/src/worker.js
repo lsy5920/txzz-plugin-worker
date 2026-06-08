@@ -410,6 +410,19 @@ async function listAccounts(env) {
   return rows.map(publicAccount);
 }
 
+async function listAccountRows(env) {
+  return await supabase(env, "txzz_accounts?select=*&enabled=eq.true&order=created_at.asc");
+}
+
+function shuffle(items) {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
 async function getAccount(env, accountId = "") {
   let rows = [];
   if (accountId) rows = await supabase(env, `txzz_accounts?select=*&id=eq.${encodeURIComponent(accountId)}&limit=1`);
@@ -539,70 +552,81 @@ async function statM3u8Quick(link, env, timeoutMs = 2500) {
 async function fullDetail(env, ctx, body = {}) {
   const movieId = String(body.movieId || body.id || "").trim();
   if (!movieId) throw new Error("missing movieId");
-  const account = await getAccount(env, body.accountId || "");
-  const cached = await cacheGet(env, account.id, movieId);
-  if (cached) {
+  const bootstrap = body.bootstrapSession?.deviceId && body.bootstrapSession?.userToken ? body.bootstrapSession : null;
+  const preferredAccountId = String(body.accountId || "").trim();
+  const candidates = preferredAccountId ? [await getAccount(env, preferredAccountId)] : shuffle(await listAccountRows(env));
+  if (!candidates.length) throw new Error("remote account pool is empty");
+
+  const errors = [];
+  for (const account of candidates) {
+    const cached = await cacheGet(env, account.id, movieId);
+    if (cached) {
+      return {
+        ok: true,
+        detail: cached.detail,
+        data: cached.detail,
+        summary: { ...cached.summary, cacheHit: true, remote: true, rotation: { accountId: account.id, tried: errors.length + 1 } },
+        account: publicAccount(account),
+        state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [cached.summary] }
+      };
+    }
+
+    let verified = null;
+    let detail = null;
+    let action = "direct_full_detail";
+    try {
+      verified = await acquireAccountSession(account, env, bootstrap);
+      await updateAccountAfterVerify(env, account, verified);
+      detail = await apiRequest("/movie/detail", { id: movieId }, verified, env);
+      if (detail?.has_buy !== "y" && detail?.layer_type === "money" && Number(detail?.money || 0) > 0) {
+        action = "buy_then_full_detail";
+        await apiRequest("/movie/doBuy", { id: movieId }, verified, env);
+        detail = await apiRequest("/movie/detail", { id: movieId }, verified, env);
+      }
+    } catch (err) {
+      const message = err?.message || String(err);
+      errors.push({ accountId: account.id, label: account.label, error: message });
+      await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(account.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "error", last_error: message })
+      }).catch(() => {});
+      await audit(env, "movie.full_detail", { accountId: account.id, movieId, ok: false, message });
+      continue;
+    }
+
+    const summary = {
+      movieId,
+      action,
+      accountId: account.id,
+      accountLabel: account.label,
+      accountUser: account.username || accountName(verified?.userInfo),
+      hasBuy: detail?.has_buy,
+      layerType: detail?.layer_type,
+      money: detail?.money,
+      oldMoney: detail?.old_money,
+      balance: detail?.balance,
+      playLink: detail?.play_link,
+      backupLink: detail?.backup_link,
+      fullStat: detail?.play_link ? { url: absoluteUrl(detail.play_link, env), pending: true } : null,
+      backupStat: detail?.backup_link ? { url: absoluteUrl(detail.backup_link, env), pending: true } : null,
+      fetchedAt: nowIso(),
+      remote: true,
+      rotation: { accountId: account.id, tried: errors.length + 1, failed: errors }
+    };
+    await cacheSet(env, account.id, movieId, detail, summary);
+    ctxWaitUntilStat(ctx, env, account.id, movieId, detail, summary);
+    await audit(env, "movie.full_detail", { accountId: account.id, movieId, ok: true, meta: { action, tried: errors.length + 1 } });
     return {
       ok: true,
-      detail: cached.detail,
-      data: cached.detail,
-      summary: { ...cached.summary, cacheHit: true, remote: true },
-      account: publicAccount(account),
-      state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [cached.summary] }
+      detail,
+      data: detail,
+      summary,
+      account: publicAccount({ ...account, status: "ok", user_info: verified?.userInfo }),
+      state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [summary] }
     };
   }
 
-  const bootstrap = body.bootstrapSession?.deviceId && body.bootstrapSession?.userToken ? body.bootstrapSession : null;
-  let verified = null;
-  let detail = null;
-  let action = "direct_full_detail";
-  try {
-    verified = await acquireAccountSession(account, env, bootstrap);
-    await updateAccountAfterVerify(env, account, verified);
-    detail = await apiRequest("/movie/detail", { id: movieId }, verified, env);
-    if (detail?.has_buy !== "y" && detail?.layer_type === "money" && Number(detail?.money || 0) > 0) {
-      action = "buy_then_full_detail";
-      await apiRequest("/movie/doBuy", { id: movieId }, verified, env);
-      detail = await apiRequest("/movie/detail", { id: movieId }, verified, env);
-    }
-  } catch (err) {
-    await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(account.id)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ status: "error", last_error: err?.message || String(err) })
-    }).catch(() => {});
-    await audit(env, "movie.full_detail", { accountId: account.id, movieId, ok: false, message: err?.message || String(err) });
-    throw err;
-  }
-
-  const summary = {
-    movieId,
-    action,
-    accountId: account.id,
-    accountLabel: account.label,
-    accountUser: account.username || accountName(verified?.userInfo),
-    hasBuy: detail?.has_buy,
-    layerType: detail?.layer_type,
-    money: detail?.money,
-    oldMoney: detail?.old_money,
-    balance: detail?.balance,
-    playLink: detail?.play_link,
-    backupLink: detail?.backup_link,
-    fullStat: detail?.play_link ? { url: absoluteUrl(detail.play_link, env), pending: true } : null,
-    backupStat: detail?.backup_link ? { url: absoluteUrl(detail.backup_link, env), pending: true } : null,
-    fetchedAt: nowIso(),
-    remote: true
-  };
-  await cacheSet(env, account.id, movieId, detail, summary);
-  ctxWaitUntilStat(ctx, env, account.id, movieId, detail, summary);
-  await audit(env, "movie.full_detail", { accountId: account.id, movieId, ok: true, meta: { action } });
-  return {
-    ok: true,
-    detail,
-    data: detail,
-    summary,
-    account: publicAccount({ ...account, status: "ok", user_info: verified?.userInfo }),
-    state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [summary] }
-  };
+  throw new Error(`all remote accounts failed: ${JSON.stringify(errors.slice(-5))}`);
 }
 
 function ctxWaitUntilStat(ctx, env, accountId, movieId, detail, summary) {
