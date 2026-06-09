@@ -71,7 +71,7 @@ TXZZ_PROXY_SIGNING_KEY
 TXZZ_SEED_ACCOUNTS_JSON
 ```
 
-工作流会先部署 Worker，再通过 `wrangler secret bulk` 将上述运行时密钥写入 Cloudflare Worker。也可以本地通过 Wrangler 手动设置：
+工作流会先检查必填 GitHub Secrets 是否存在，再部署 Worker，并通过 `wrangler secret bulk` 将上述运行时密钥写入 Cloudflare Worker。也可以本地通过 Wrangler 手动设置：
 
 ```powershell
 cd .\txzz-worker
@@ -97,3 +97,7 @@ node -e "JSON.parse(require('fs').readFileSync('.\\tangxin-zhizhe-extension\\man
 ## 安全提醒
 
 本项目只用于授权 CTF 隔离靶场。开源前请确认 `.dev.vars`、`evidence/`、浏览器 profile、截图、CDP 输出、账号密码、token/deviceId、Supabase key 都没有进入仓库。已经在聊天、日志或截图中出现过的密钥应立即轮换。
+
+## 更新日志
+
+2026-06-09 19:27 【优化】优化 GitHub Actions 部署流程，新增必填 GitHub Secrets 存在性检查；部署失败时可更快定位 Cloudflare 或 Supabase 相关密钥是否缺失，不影响 Worker 业务接口逻辑。

@@ -33,6 +33,37 @@ jobs:
       - name: Check Worker syntax
         run: npm run check
 
+      - name: Check GitHub secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TXZZ_API_AES_KEY: ${{ secrets.TXZZ_API_AES_KEY }}
+          TXZZ_CREDENTIAL_KEY: ${{ secrets.TXZZ_CREDENTIAL_KEY }}
+          TXZZ_ADMIN_TOKEN: ${{ secrets.TXZZ_ADMIN_TOKEN }}
+          TXZZ_CLIENT_TOKEN: ${{ secrets.TXZZ_CLIENT_TOKEN }}
+          TXZZ_SEED_ACCOUNTS_JSON: ${{ secrets.TXZZ_SEED_ACCOUNTS_JSON }}
+        run: |
+          node - <<'NODE'
+          const required = [
+            "CLOUDFLARE_API_TOKEN",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "SUPABASE_URL",
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "TXZZ_API_AES_KEY",
+            "TXZZ_CREDENTIAL_KEY",
+            "TXZZ_ADMIN_TOKEN",
+            "TXZZ_CLIENT_TOKEN",
+            "TXZZ_SEED_ACCOUNTS_JSON"
+          ];
+          const missing = required.filter((key) => !process.env[key]);
+          if (missing.length) {
+            throw new Error(`Missing GitHub Secrets: ${missing.join(", ")}`);
+          }
+          console.log("GitHub Secrets presence check passed.");
+          NODE
+
       - name: Deploy
         uses: cloudflare/wrangler-action@v3
         with:
