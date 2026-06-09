@@ -18,7 +18,8 @@ Worker 负责：
 
 - 从 Supabase 读取远程账号池，并只返回脱敏后的账号状态。
 - 使用 `TXZZ_CREDENTIAL_KEY` 对完整账号凭据做 AES-GCM 加密后再写入 Supabase。
-- 在服务端登录完整权限账号、拉取 `/movie/detail`、按需执行金币视频购买，再把完整播放详情返回给插件。
+- 在服务端通过账号密码、已缓存 token 或二维码凭证恢复完整权限账号会话。
+- 在服务端拉取 `/movie/detail`、按需执行金币视频购买，再把完整播放详情返回给插件。
 - 缓存完整播放详情，减少重复登录和重复购买流程。
 
 ## Supabase 初始化
@@ -94,6 +95,28 @@ Invoke-RestMethod `
   -Headers @{ "X-TXZZ-Client-Token" = "<TXZZ_CLIENT_TOKEN>" } `
   -Uri http://127.0.0.1:8787/v1/accounts
 ```
+
+上传二维码凭证账号：
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Headers @{ "X-TXZZ-Admin-Token" = "<TXZZ_ADMIN_TOKEN>" } `
+  -ContentType "application/json; charset=utf-8" `
+  -Body (@{
+    account = @{
+      id = "full-qr-自定义短编号"
+      label = "QR credential 自定义短编号"
+      qrcode = "<二维码解析出的凭证内容>"
+      enabled = $true
+      source = "qrcode"
+      notes = "二维码凭证账号，Worker 服务端加密保存"
+    }
+  } | ConvertTo-Json -Depth 5) `
+  -Uri http://127.0.0.1:8787/v1/accounts
+```
+
+二维码凭证会写入 `secret_box` 并由 Worker 使用 `TXZZ_CREDENTIAL_KEY` 加密。`GET /v1/accounts` 只返回 `hasQrcode` 等脱敏摘要，不返回凭证明文。
 
 ## GitHub 部署到 Cloudflare
 
@@ -182,3 +205,7 @@ GET  /v1/media/proxy
 - 不要把 `.dev.vars`、`evidence/`、浏览器 profile、CDP 输出提交到 GitHub。
 - 开源版本建议保留 Worker 远程模式，关闭或移除前端本地 fallback 里的真实靶场 AES key。
 - 该项目只用于授权 CTF 隔离靶场，不用于真实站点、真实支付或非授权账号。
+
+## 更新日志
+
+2026-06-09 16:08 【新增】新增远程 Worker 二维码凭证账号恢复能力，账号池可保存 `qrcode` 凭证并在服务端通过 `/user/findQrcode` 获取完整权限会话；同步固定 Wrangler 依赖版本为 `4.98.0`，便于后续部署环境稳定复现。

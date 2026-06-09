@@ -1,6 +1,6 @@
 {
   "name": "txzz-secure-pool-worker",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,6 @@
     "check": "node --check src/worker.js"
   },
   "devDependencies": {
-    "wrangler": "^4.0.0"
+    "wrangler": "4.98.0"
   }
 }
