@@ -137,7 +137,7 @@ TXZZ_PROXY_SIGNING_KEY
 TXZZ_SEED_ACCOUNTS_JSON
 ```
 
-工作流当前绑定 `VITE_SUPABASE_URL` 环境，会先检查该环境下的必填 GitHub Secrets 是否存在，再通过 `wrangler deploy --secrets-file` 将代码和运行时密钥一起发布到 Cloudflare Worker。Worker 配置已开启 `workers_dev = true`，部署后优先使用 Cloudflare 默认 `*.workers.dev` 域名；GitHub 只负责触发部署，不提供可运行的 Worker 接口域名。也可以本地通过 Wrangler 手动设置：
+工作流当前绑定 `VITE_SUPABASE_URL` 环境，会先检查该环境下的必填 GitHub Secrets 是否存在，再通过 `wrangler deploy --secrets-file` 将代码和运行时密钥一起发布到 Cloudflare Worker。Worker 配置已开启 `workers_dev = true`，部署后优先使用 Cloudflare 默认 `*.workers.dev` 域名；工作流会在 Summary 中输出完整默认 Worker 地址。GitHub 只负责触发部署，不提供可运行的 Worker 接口域名。也可以本地通过 Wrangler 手动设置：
 
 ```powershell
 cd .\txzz-worker
@@ -221,3 +221,4 @@ GET  /v1/media/proxy
 2026-06-09 19:47 【新增】新增 `/v1/health` 运行时诊断字段，返回构建标识和必填密钥存在状态，便于排查自定义域名是否指向最新 Worker 以及运行时密钥是否注入成功；诊断结果不返回任何密钥明文。
 2026-06-09 19:54 【修复】修复 Worker 发布后运行时密钥未注入的问题，GitHub Actions 改为使用 `wrangler deploy --secrets-file` 将代码和密钥随同版本一起发布，避免部署成功但线上环境变量为空。
 2026-06-09 20:00 【优化】启用 Cloudflare Worker 默认 `workers.dev` 部署域名，文档明确 GitHub 只负责部署触发，插件远程地址应优先填写默认 Worker 域名而不是自定义域名。
+2026-06-09 20:15 【新增】GitHub Actions 新增默认 Worker 地址输出步骤，部署完成后自动在 Summary 中显示 `workers.dev` 完整访问地址，方便直接复制到插件远程配置。
