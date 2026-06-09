@@ -114,24 +114,30 @@ jobs:
         run: |
           node - <<'NODE'
           const fs = require("fs");
-          const output = fs.existsSync("deploy-output.txt") ? fs.readFileSync("deploy-output.txt", "utf8") : "";
-          const deployed = output.match(/https:\/\/[^\s]+\.workers\.dev[^\s]*/);
-          if (deployed) {
-            console.log(`默认 Worker 地址: ${deployed[0]}`);
-            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## 默认 Worker 地址\n\n${deployed[0]}\n`);
-            process.exit(0);
+          async function main() {
+            const output = fs.existsSync("deploy-output.txt") ? fs.readFileSync("deploy-output.txt", "utf8") : "";
+            const deployed = output.match(/https:\/\/[^\s]+\.workers\.dev[^\s]*/);
+            if (deployed) {
+              console.log(`默认 Worker 地址: ${deployed[0]}`);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## 默认 Worker 地址\n\n${deployed[0]}\n`);
+              return;
+            }
+            const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+            const token = process.env.CLOUDFLARE_API_TOKEN;
+            const headers = { authorization: `Bearer ${token}` };
+            const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/subdomain`, { headers });
+            const data = await res.json();
+            if (!res.ok || !data?.result?.subdomain) {
+              console.log(`Cloudflare workers.dev subdomain query failed: ${JSON.stringify(data)}`);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## 默认 Worker 地址\n\n本次未能自动读取，请在 Cloudflare Worker 页面复制 `workers.dev` 地址。\n");
+              return;
+            }
+            const url = `https://txzz-secure-pool.${data.result.subdomain}.workers.dev`;
+            console.log(`默认 Worker 地址: ${url}`);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## 默认 Worker 地址\n\n${url}\n`);
           }
-          const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-          const token = process.env.CLOUDFLARE_API_TOKEN;
-          const headers = { authorization: `Bearer ${token}` };
-          const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/subdomain`, { headers });
-          const data = await res.json();
-          if (!res.ok || !data?.result?.subdomain) {
-            console.log(`Cloudflare workers.dev subdomain query failed: ${JSON.stringify(data)}`);
+          main().catch((error) => {
+            console.log(`默认 Worker 地址读取失败: ${error.message}`);
             fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## 默认 Worker 地址\n\n本次未能自动读取，请在 Cloudflare Worker 页面复制 `workers.dev` 地址。\n");
-            process.exit(0);
-          }
-          const url = `https://txzz-secure-pool.${data.result.subdomain}.workers.dev`;
-          console.log(`默认 Worker 地址: ${url}`);
-          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## 默认 Worker 地址\n\n${url}\n`);
+          });
           NODE

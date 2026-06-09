@@ -106,3 +106,4 @@ node -e "JSON.parse(require('fs').readFileSync('.\\tangxin-zhizhe-extension\\man
 2026-06-09 20:00 【优化】启用 Cloudflare Worker 默认 `workers.dev` 部署域名，文档明确 GitHub 只负责部署触发，插件远程地址应优先填写默认 Worker 域名而不是自定义域名。
 2026-06-09 20:15 【新增】GitHub Actions 新增默认 Worker 地址输出步骤，部署完成后自动在 Summary 中显示 `workers.dev` 完整访问地址，方便直接复制到插件远程配置。
 2026-06-09 20:22 【修复】默认 Worker 地址输出步骤改为非阻断执行，并优先从 Wrangler 部署输出中解析 `workers.dev` 地址，避免地址查询失败导致整体部署显示失败。
+2026-06-09 20:28 【修复】修复默认 Worker 地址输出脚本中 `require` 与顶层 `await` 混用导致的 Node 模块格式冲突，脚本改为异步函数包裹执行。
