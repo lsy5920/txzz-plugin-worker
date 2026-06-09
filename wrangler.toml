@@ -1,6 +1,7 @@
 name = "txzz-secure-pool"
 main = "txzz-worker/src/worker.js"
 compatibility_date = "2026-06-01"
+workers_dev = true
 
 [vars]
 TXZZ_TARGET_BASE_URL = "https://txh068.com"
