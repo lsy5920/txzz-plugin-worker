@@ -660,7 +660,15 @@ async function fullDetail(env, ctx, body = {}) {
   if (!movieId) throw new Error("missing movieId");
   const bootstrap = body.bootstrapSession?.deviceId && body.bootstrapSession?.userToken ? body.bootstrapSession : null;
   const preferredAccountId = String(body.accountId || "").trim();
-  const candidates = preferredAccountId ? [await getAccount(env, preferredAccountId)] : shuffle(await listAccountRows(env));
+  const accountMode = String(body.accountMode || "").trim();
+  const rows = await listAccountRows(env);
+  let candidates = accountMode === "cloud-fixed" && preferredAccountId
+    ? rows.filter((account) => account.id === preferredAccountId)
+    : shuffle(rows);
+  if (preferredAccountId && accountMode !== "cloud-fixed") {
+    const preferred = rows.find((account) => account.id === preferredAccountId);
+    if (preferred) candidates = [preferred, ...candidates.filter((account) => account.id !== preferredAccountId)];
+  }
   if (!candidates.length) throw new Error("remote account pool is empty");
 
   const errors = [];

@@ -182,6 +182,12 @@ POST /v1/movie/full-detail
 
 Worker 在服务端完成完整账号验证、完整详情获取和金币视频购买判断，插件端只接收可用于沙箱验证的详情结果。
 
+账号轮换规则：
+
+- `accountMode=cloud`：Worker 随机轮换云端账号；如果插件带了 `accountId`，该账号只作为优先尝试对象，失败后继续尝试其他启用账号。
+- `accountMode=cloud-fixed`：Worker 只使用指定 `accountId`，适合固定测试某个云端账号。
+- `accountMode=cloud-first`：插件优先使用云端，云端失败后再走本地兜底。
+
 ## 接口
 
 ```text
@@ -209,3 +215,4 @@ GET  /v1/media/proxy
 ## 更新日志
 
 2026-06-09 16:08 【新增】新增远程 Worker 二维码凭证账号恢复能力，账号池可保存 `qrcode` 凭证并在服务端通过 `/user/findQrcode` 获取完整权限会话；同步固定 Wrangler 依赖版本为 `4.98.0`，便于后续部署环境稳定复现。
+2026-06-09 16:21 【修复】优化云端账号轮换策略，非固定模式下选中账号只作为优先尝试对象，失败后继续轮换其他启用账号；新增 `cloud-fixed` 固定账号模式，便于固定测试指定云端账号。
