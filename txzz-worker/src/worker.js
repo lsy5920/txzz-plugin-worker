@@ -456,6 +456,33 @@ async function loginByAccount(account, bootstrapSession, env) {
   throw new Error(`account login failed: ${JSON.stringify(attempts.slice(-4))}`);
 }
 
+async function restoreByQrcode(account, bootstrapSession, env) {
+  const attempts = [];
+  const candidateDeviceIds = [
+    bootstrapSession?.deviceId,
+    account.deviceId,
+    "web_8c204a9995314",
+    makeDeviceId(),
+    makeDeviceId(),
+    makeDeviceId(),
+    makeDeviceId()
+  ].filter(Boolean);
+  for (const deviceId of [...new Set(candidateDeviceIds)]) {
+    try {
+      const visitor = bootstrapSession?.deviceId === deviceId && bootstrapSession?.userToken
+        ? bootstrapSession
+        : await createVisitorSession(deviceId, env);
+      const data = await apiRequest("/user/findQrcode", { code: account.qrcode }, visitor, env);
+      const userToken = buildFullToken(data);
+      if (!userToken) throw new Error("/user/findQrcode did not return token/user_id");
+      return await verifySessionForAccount(account, { deviceId, userToken }, env);
+    } catch (err) {
+      attempts.push({ deviceId, error: err?.message || String(err) });
+    }
+  }
+  throw new Error(`qrcode restore failed: ${JSON.stringify(attempts.slice(-4))}`);
+}
+
 async function acquireAccountSession(row, env, bootstrapSession = null) {
   const secret = await decryptSecret(row.secret_box, env);
   const account = { ...row, ...secret };
@@ -470,6 +497,13 @@ async function acquireAccountSession(row, env, bootstrapSession = null) {
   if (account.username && account.password) {
     try {
       return await loginByAccount(account, bootstrapSession, env);
+    } catch (err) {
+      errors.push(err?.message || String(err));
+    }
+  }
+  if (account.qrcode) {
+    try {
+      return await restoreByQrcode(account, bootstrapSession, env);
     } catch (err) {
       errors.push(err?.message || String(err));
     }
