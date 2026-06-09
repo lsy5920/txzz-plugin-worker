@@ -326,7 +326,26 @@ function unpkcs7(data) {
 }
 
 async function importTargetAesKey(env) {
-  return crypto.subtle.importKey("raw", enc.encode(requireEnv(env, "TXZZ_API_AES_KEY")), "AES-CBC", false, ["encrypt", "decrypt"]);
+  const normalized = normalizeAesKeyText(requireEnv(env, "TXZZ_API_AES_KEY"));
+  return crypto.subtle.importKey("raw", enc.encode(normalized), "AES-CBC", false, ["encrypt", "decrypt"]);
+}
+
+function normalizeAesKeyText(value) {
+  const text = String(value || "").trim();
+  const direct = text.replace(/^["']|["']$/g, "");
+  if ([16, 24, 32].includes(enc.encode(direct).length)) return direct;
+  try {
+    const parsed = JSON.parse(text);
+    for (const key of ["aesKey", "apiAesKey", "TXZZ_API_AES_KEY", "key"]) {
+      const hit = parsed?.[key] ? normalizeAesKeyText(parsed[key]) : "";
+      if (hit) return hit;
+    }
+  } catch (_) {}
+  for (const match of text.matchAll(/[A-Za-z0-9_-]{16,32}/g)) {
+    const candidate = match[0];
+    if ([16, 24, 32].includes(enc.encode(candidate).length)) return candidate;
+  }
+  throw new Error(`TXZZ_API_AES_KEY 字节长度无效：${enc.encode(text).length}，需要 16、24 或 32 字节`);
 }
 
 async function encryptBlock(key, block, iv = new Uint8Array(16)) {
@@ -498,7 +517,12 @@ async function restoreByQrcode(account, bootstrapSession, env) {
 }
 
 async function acquireAccountSession(row, env, bootstrapSession = null) {
-  const secret = await decryptSecret(row.secret_box, env);
+  let secret = {};
+  try {
+    secret = await decryptSecret(row.secret_box, env);
+  } catch (err) {
+    throw new Error(`credential decrypt failed, please re-upload this cloud account: ${err?.message || err}`);
+  }
   const account = { ...row, ...secret };
   const errors = [];
   if (account.userToken && account.deviceId) {
@@ -541,6 +565,10 @@ function shuffle(items) {
     [out[i], out[j]] = [out[j], out[i]];
   }
   return out;
+}
+
+function isUsableAccountRow(row = {}) {
+  return row.enabled !== false && row.status !== "error";
 }
 
 async function getAccount(env, accountId = "") {
@@ -678,9 +706,9 @@ async function fullDetail(env, ctx, body = {}) {
   const rows = await listAccountRows(env);
   let candidates = accountMode === "cloud-fixed" && preferredAccountId
     ? rows.filter((account) => account.id === preferredAccountId)
-    : shuffle(rows);
+    : shuffle(rows.filter(isUsableAccountRow));
   if (preferredAccountId && accountMode !== "cloud-fixed") {
-    const preferred = rows.find((account) => account.id === preferredAccountId);
+    const preferred = rows.find((account) => account.id === preferredAccountId && isUsableAccountRow(account));
     if (preferred) candidates = [preferred, ...candidates.filter((account) => account.id !== preferredAccountId)];
   }
   if (!candidates.length) throw new Error("remote account pool is empty");
@@ -797,6 +825,11 @@ async function handle(request, env, ctx) {
   }
   if (path === "/v1/accounts" && request.method === "POST") {
     requireAdmin(request, env);
+    const body = await request.json();
+    return json({ ok: true, account: await saveAccount(env, body.account || body) });
+  }
+  if (path === "/v1/accounts/client-upload" && request.method === "POST") {
+    requireClient(request, env);
     const body = await request.json();
     return json({ ok: true, account: await saveAccount(env, body.account || body) });
   }

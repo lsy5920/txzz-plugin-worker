@@ -71,7 +71,7 @@ TXZZ_PROXY_SIGNING_KEY
 TXZZ_SEED_ACCOUNTS_JSON
 ```
 
-工作流当前绑定 `VITE_SUPABASE_URL` 环境，会先检查该环境下的必填 GitHub Secrets 是否存在，再通过 `wrangler deploy --secrets-file` 将代码和运行时密钥一起发布到 Cloudflare Worker。Worker 配置已开启 `workers_dev = true`，部署后优先使用 Cloudflare 默认 `*.workers.dev` 域名；工作流会在 Summary 中输出完整默认 Worker 地址。GitHub 只负责触发部署，不提供可运行的 Worker 接口域名。也可以本地通过 Wrangler 手动设置：
+工作流当前绑定 `VITE_SUPABASE_URL` 环境，会先检查该环境下的必填 GitHub Secrets 是否存在，再通过 `wrangler deploy --secrets-file` 将代码和运行时密钥一起发布到 Cloudflare Worker。Worker 配置已开启 `workers_dev = true`，同时建议绑定并优先使用国内访问更稳定的自定义域名 `https://txzzsecure.lsy20.top`。也可以本地通过 Wrangler 手动设置：
 
 ```powershell
 cd .\txzz-worker
@@ -107,3 +107,4 @@ node -e "JSON.parse(require('fs').readFileSync('.\\tangxin-zhizhe-extension\\man
 2026-06-09 20:15 【新增】GitHub Actions 新增默认 Worker 地址输出步骤，部署完成后自动在 Summary 中显示 `workers.dev` 完整访问地址，方便直接复制到插件远程配置。
 2026-06-09 20:22 【修复】默认 Worker 地址输出步骤改为非阻断执行，并优先从 Wrangler 部署输出中解析 `workers.dev` 地址，避免地址查询失败导致整体部署显示失败。
 2026-06-09 20:28 【修复】修复默认 Worker 地址输出脚本中 `require` 与顶层 `await` 混用导致的 Node 模块格式冲突，脚本改为异步函数包裹执行。
+2026-06-09 21:35 【新增】新增客户端账号上传接口，支持插件把本地完整账号上传为云端加密凭证；默认访问地址改为 `https://txzzsecure.lsy20.top`，并优化坏凭证账号轮换策略。
