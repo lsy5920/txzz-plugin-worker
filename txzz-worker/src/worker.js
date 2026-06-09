@@ -10,6 +10,16 @@ const JSON_HEADERS = {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+const BUILD_TAG = "txzz-worker-20260609-1947";
+const REQUIRED_SECRET_KEYS = [
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "TXZZ_API_AES_KEY",
+  "TXZZ_CREDENTIAL_KEY",
+  "TXZZ_ADMIN_TOKEN",
+  "TXZZ_CLIENT_TOKEN",
+  "TXZZ_SEED_ACCOUNTS_JSON"
+];
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), { status, headers: JSON_HEADERS });
@@ -23,6 +33,10 @@ function requireEnv(env, key) {
   const value = env[key];
   if (!value) throw new Error(`Missing Worker secret/env: ${key}`);
   return value;
+}
+
+function envReady(env) {
+  return Object.fromEntries(REQUIRED_SECRET_KEYS.map((key) => [key, Boolean(env[key])]));
 }
 
 function nowIso() {
@@ -775,7 +789,7 @@ async function handle(request, env, ctx) {
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
   if (path === "/" || path === "/v1/health") {
-    return json({ ok: true, service: "txzz-secure-pool", time: nowIso() });
+    return json({ ok: true, service: "txzz-secure-pool", build: BUILD_TAG, envReady: envReady(env), time: nowIso() });
   }
   if (path === "/v1/accounts" && request.method === "GET") {
     requireClient(request, env);
