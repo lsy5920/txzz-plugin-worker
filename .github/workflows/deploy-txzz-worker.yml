@@ -14,6 +14,7 @@ jobs:
   deploy:
     name: Deploy Cloudflare Worker
     runs-on: ubuntu-latest
+    environment: VITE_SUPABASE_URL
     defaults:
       run:
         working-directory: txzz-worker
