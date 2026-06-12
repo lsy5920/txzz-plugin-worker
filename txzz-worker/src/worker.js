@@ -10,7 +10,7 @@ const JSON_HEADERS = {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BUILD_TAG = "txzz-worker-20260609-1947";
+const BUILD_TAG = "txzz-worker-20260613-0031";
 const REQUIRED_SECRET_KEYS = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -145,8 +145,19 @@ function publicUserInfo(info = null) {
     nickname: info.nickname,
     balance: info.balance,
     balance_income: info.balance_income,
+    coin: info.coin,
+    gold: info.gold,
+    money: info.money,
+    amount: info.amount,
+    wallet: info.wallet,
     is_vip: info.is_vip,
     is_dark_vip: info.is_dark_vip,
+    vip: info.vip,
+    dark_vip: info.dark_vip,
+    has_vip: info.has_vip,
+    has_dark_vip: info.has_dark_vip,
+    vip_end_time: info.vip_end_time,
+    dark_vip_end_time: info.dark_vip_end_time,
     group_name: info.group_name,
     group_end_time: info.group_end_time,
     ticket: info.ticket
@@ -200,7 +211,7 @@ function normalizeAccount(raw = {}) {
     deviceId: String(raw.deviceId || ""),
     userToken: String(raw.userToken || raw.token || ""),
     notes: String(raw.notes || ""),
-    userInfo: raw.userInfo || null,
+    userInfo: raw.userInfo || raw.user_info || null,
     status: raw.status || "idle"
   };
 }
@@ -729,11 +740,12 @@ async function fullDetail(env, ctx, body = {}) {
     }
 
     let verified = null;
+    let verifiedAccount = null;
     let detail = null;
     let action = "direct_full_detail";
     try {
       verified = await acquireAccountSession(account, env, bootstrap);
-      await updateAccountAfterVerify(env, account, verified);
+      verifiedAccount = await updateAccountAfterVerify(env, account, verified);
       detail = normalizeFullDetail(await apiRequest("/movie/detail", { id: movieId }, verified, env));
       if (detail?.has_buy !== "y" && detail?.layer_type === "money" && Number(detail?.money || 0) > 0) {
         action = "buy_then_full_detail";
@@ -778,7 +790,7 @@ async function fullDetail(env, ctx, body = {}) {
       detail,
       data: detail,
       summary,
-      account: publicAccount({ ...account, status: "ok", user_info: verified?.userInfo }),
+      account: publicAccount(verifiedAccount || { ...account, status: "ok", user_info: verified?.userInfo }),
       state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [summary] }
     };
   }
@@ -835,7 +847,6 @@ async function handle(request, env, ctx) {
     return json({ ok: true, accounts: await seedAccounts(env) });
   }
   if (path === "/v1/accounts/verify" && request.method === "POST") {
-    requireAdmin(request, env);
     const body = await request.json();
     const account = await getAccount(env, body.accountId || "");
     const session = await acquireAccountSession(account, env, body.bootstrapSession || null);

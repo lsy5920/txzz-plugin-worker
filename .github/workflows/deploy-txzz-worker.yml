@@ -42,8 +42,6 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TXZZ_API_AES_KEY: ${{ secrets.TXZZ_API_AES_KEY }}
           TXZZ_CREDENTIAL_KEY: ${{ secrets.TXZZ_CREDENTIAL_KEY }}
-          TXZZ_ADMIN_TOKEN: ${{ secrets.TXZZ_ADMIN_TOKEN }}
-          TXZZ_CLIENT_TOKEN: ${{ secrets.TXZZ_CLIENT_TOKEN }}
           TXZZ_SEED_ACCOUNTS_JSON: ${{ secrets.TXZZ_SEED_ACCOUNTS_JSON }}
         run: |
           node - <<'NODE'
@@ -54,8 +52,6 @@ jobs:
             "SUPABASE_SERVICE_ROLE_KEY",
             "TXZZ_API_AES_KEY",
             "TXZZ_CREDENTIAL_KEY",
-            "TXZZ_ADMIN_TOKEN",
-            "TXZZ_CLIENT_TOKEN",
             "TXZZ_SEED_ACCOUNTS_JSON"
           ];
           const missing = required.filter((key) => !process.env[key]);
@@ -73,8 +69,6 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TXZZ_API_AES_KEY: ${{ secrets.TXZZ_API_AES_KEY }}
           TXZZ_CREDENTIAL_KEY: ${{ secrets.TXZZ_CREDENTIAL_KEY }}
-          TXZZ_ADMIN_TOKEN: ${{ secrets.TXZZ_ADMIN_TOKEN }}
-          TXZZ_CLIENT_TOKEN: ${{ secrets.TXZZ_CLIENT_TOKEN }}
           TXZZ_PROXY_SIGNING_KEY: ${{ secrets.TXZZ_PROXY_SIGNING_KEY }}
           TXZZ_SEED_ACCOUNTS_JSON: ${{ secrets.TXZZ_SEED_ACCOUNTS_JSON }}
         run: |
@@ -85,8 +79,6 @@ jobs:
             "SUPABASE_SERVICE_ROLE_KEY",
             "TXZZ_API_AES_KEY",
             "TXZZ_CREDENTIAL_KEY",
-            "TXZZ_ADMIN_TOKEN",
-            "TXZZ_CLIENT_TOKEN",
             "TXZZ_SEED_ACCOUNTS_JSON"
           ];
           const missing = required.filter((key) => !process.env[key]);
