@@ -175,6 +175,8 @@ function publicAccount(row = {}) {
     role: row.role || "full",
     enabled: row.enabled !== false,
     source: row.source || "remote",
+    cloudReadonly: true,
+    remoteId: row.id,
     status: row.status || "idle",
     notes: row.notes || "",
     lastVerifiedAt: row.last_verified_at || "",
