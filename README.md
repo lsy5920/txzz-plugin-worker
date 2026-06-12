@@ -1,62 +1,100 @@
-# txulog-lsy CTF 插件工作区
+# 糖心志者云端服务仓库
 
-本仓库包含面向授权 CTF 隔离靶场的 Chrome MV3 插件、Cloudflare Worker 中间层和 CDP 验证脚本。当前主插件是「糖心志者」，用于验证游客账号侧的权限展示、完整账号池、完整播放链路、金币视频购买判断和远程账号池同步。
+本仓库用于部署「糖心志者」插件的云端服务，包含 Cloudflare Worker、Supabase 数据库脚本和 GitHub Actions 自动发布配置。
 
-## 目录
+## 项目介绍
 
-```text
-.
-├── tangxin-zhizhe-extension/   # 糖心志者 Chrome 插件
-├── txzz-worker/                # Cloudflare Worker + Supabase 远程账号池
-├── hongyan-repro-extension/    # 糖心炮弹交易复现插件
-├── verify_txzz_real_cdp.js     # 真实隔离靶场 CDP 验证脚本
-├── verify_txzz_extension.js    # 本地 fixture 回归脚本
-└── .github/workflows/          # GitHub Actions 部署 Worker
-```
+「糖心志者」插件需要一个服务端中间层来保护完整账号凭据、管理云端账号池、执行账号轮换并向插件返回脱敏后的账号摘要。当前仓库提供完整的 Worker 部署结构，适合直接推送到 GitHub 后通过 Actions 发布到 Cloudflare。
 
-## 推荐部署方式
+## 核心功能
 
-```mermaid
-flowchart LR
-  A["GitHub 仓库"] -->|"Actions"| B["Cloudflare Worker"]
-  C["Chrome 插件"] -->|"Client Token"| B
-  B -->|"service_role"| D["Supabase"]
-  B -->|"服务端加密请求"| E["CTF 靶场 API"]
-```
+- Cloudflare Worker 服务端接口
+- Supabase 账号池读取和写入
+- 完整账号凭据服务端加密保存
+- 云端账号摘要返回
+- 固定账号和随机轮换账号模式
+- 本地账号上传云端接口
+- Worker 健康检查接口
+- GitHub Actions 自动部署
+- 部署完成后输出 Worker 默认访问地址
 
-GitHub 只负责部署 Worker。敏感信息不要提交到仓库：
+## 环境要求
 
-- Supabase `service_role`
-- 完整权限账号密码
-- 完整账号 token/deviceId
-- 目标接口 AES key
-- Worker admin/client token
+- Node.js `22.16.0` 及以上
+- npm `10.0.0` 及以上
+- Wrangler `4.98.0`
+- Cloudflare 账号
+- Supabase 项目
+- GitHub 仓库
 
-这些值应放在 Cloudflare Worker Secrets 或 GitHub Secrets。
-
-## 快速开始
-
-1. 在 Supabase 执行 `txzz-worker/schema.sql`。
-2. 在 Cloudflare/GitHub 配置 Worker 部署需要的 secret。
-3. 部署 `txzz-worker`。
-4. 调用 `/v1/accounts/seed` 写入默认完整账号池。
-5. 在 Chrome 安装 `tangxin-zhizhe-extension`。
-6. 在插件「账号池」页填写 Worker URL 和 Client Token，点击「保存远程配置」与「同步远程」。
-
-详细文档：
-
-- [糖心志者插件文档](./tangxin-zhizhe-extension/README.md)
-- [Worker 部署文档](./txzz-worker/README.md)
-
-## GitHub Actions
-
-已提供：
+## 项目目录结构
 
 ```text
-.github/workflows/deploy-txzz-worker.yml
+txzz-plugin-worker/
+├── .github/
+│   └── workflows/
+│       └── deploy-txzz-worker.yml  # GitHub Actions 部署流程
+├── txzz-worker/
+│   ├── src/
+│   │   └── worker.js               # Worker 主入口
+│   ├── schema.sql                  # Supabase 表结构
+│   ├── package.json                # Node 项目配置和固定依赖
+│   ├── wrangler.toml               # Worker 发布配置
+│   ├── .dev.vars.example           # 本地开发环境变量示例
+│   └── README.md                   # Worker 详细开发和接口文档
+├── wrangler.toml                   # 根级 Wrangler 兼容配置
+├── .gitignore                      # 仓库忽略规则
+└── README.md                       # 当前仓库说明
 ```
 
-GitHub 仓库 Secrets：
+## 快速部署
+
+### 第一步：安装依赖
+
+```powershell
+cd .\txzz-worker
+npm install
+npm run check
+```
+
+### 第二步：初始化 Supabase
+
+1. 打开 Supabase 控制台。
+2. 进入目标项目。
+3. 打开 SQL Editor。
+4. 复制 `txzz-worker/schema.sql` 全部内容。
+5. 粘贴并执行。
+
+### 第三步：配置 Cloudflare 密钥
+
+```powershell
+npx wrangler secret put SUPABASE_URL
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+npx wrangler secret put TXZZ_API_AES_KEY
+npx wrangler secret put TXZZ_CREDENTIAL_KEY
+npx wrangler secret put TXZZ_ADMIN_TOKEN
+npx wrangler secret put TXZZ_CLIENT_TOKEN
+npx wrangler secret put TXZZ_PROXY_SIGNING_KEY
+npx wrangler secret put TXZZ_SEED_ACCOUNTS_JSON
+```
+
+### 第四步：发布 Worker
+
+```powershell
+npm run deploy
+```
+
+部署完成后，使用 Worker 地址访问：
+
+```text
+https://<你的服务名>.<你的账号>.workers.dev/v1/health
+```
+
+## GitHub Actions 自动部署
+
+仓库内置 `.github/workflows/deploy-txzz-worker.yml`。配置好 Secrets 后，推送代码即可自动部署。
+
+需要在 GitHub 仓库 Secrets 中配置：
 
 ```text
 CLOUDFLARE_API_TOKEN
@@ -71,40 +109,104 @@ TXZZ_PROXY_SIGNING_KEY
 TXZZ_SEED_ACCOUNTS_JSON
 ```
 
-工作流当前绑定 `VITE_SUPABASE_URL` 环境，会先检查该环境下的必填 GitHub Secrets 是否存在，再通过 `wrangler deploy --secrets-file` 将代码和运行时密钥一起发布到 Cloudflare Worker。Worker 配置已开启 `workers_dev = true`，同时建议绑定并优先使用国内访问更稳定的自定义域名 `https://txzzsecure.lsy20.top`。也可以本地通过 Wrangler 手动设置：
+建议部署流程：
+
+1. 将本仓库推送到 GitHub。
+2. 打开仓库 `Settings`。
+3. 进入 `Secrets and variables`。
+4. 添加上方 Secrets。
+5. 推送代码或手动运行 Actions。
+6. 在 Actions Summary 中查看 Worker 地址。
+7. 把 Worker 地址填写到「糖心志者」插件的账号池页面。
+
+## 插件侧配置
+
+打开「糖心志者」插件面板：
+
+1. 进入「账号池」页。
+2. `Worker URL` 填写部署后的 Worker 地址。
+3. `Client Token` 填写 `TXZZ_CLIENT_TOKEN`。
+4. 需要上传账号时，`Admin Token` 填写 `TXZZ_ADMIN_TOKEN`。
+5. 点击「保存远程配置」。
+6. 点击「同步远程」。
+
+## 账号池数据流
+
+```mermaid
+flowchart LR
+  A["Chrome 插件"] -->|"Client Token"| B["Cloudflare Worker"]
+  B -->|"读取摘要"| C["Supabase"]
+  B -->|"加密保存凭据"| C
+  B -->|"服务端请求目标接口"| D["业务接口"]
+  B -->|"脱敏结果"| A
+```
+
+## 本地开发
+
+复制环境变量示例：
+
+```powershell
+Copy-Item .\txzz-worker\.dev.vars.example .\txzz-worker\.dev.vars
+```
+
+启动本地服务：
 
 ```powershell
 cd .\txzz-worker
-npx wrangler secret put SUPABASE_URL
-npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-npx wrangler secret put TXZZ_API_AES_KEY
-npx wrangler secret put TXZZ_CREDENTIAL_KEY
-npx wrangler secret put TXZZ_ADMIN_TOKEN
-npx wrangler secret put TXZZ_CLIENT_TOKEN
-npx wrangler secret put TXZZ_SEED_ACCOUNTS_JSON
+npm run dev
 ```
 
-## 本地检查
+健康检查：
 
 ```powershell
-node --check .\txzz-worker\src\worker.js
-node --check .\tangxin-zhizhe-extension\background.js
-node --check .\tangxin-zhizhe-extension\content.js
-node --check .\tangxin-zhizhe-extension\page_hook.js
-node -e "JSON.parse(require('fs').readFileSync('.\\tangxin-zhizhe-extension\\manifest.json','utf8')); console.log('manifest ok')"
+Invoke-RestMethod http://127.0.0.1:8787/v1/health
 ```
 
-## 安全提醒
+## 常见问题排查
 
-本项目只用于授权 CTF 隔离靶场。开源前请确认 `.dev.vars`、`evidence/`、浏览器 profile、截图、CDP 输出、账号密码、token/deviceId、Supabase key 都没有进入仓库。已经在聊天、日志或截图中出现过的密钥应立即轮换。
+### 部署成功但接口提示缺少 SUPABASE_URL
+
+1. 确认 Cloudflare Worker Secrets 中已经设置 `SUPABASE_URL`。
+2. 如果使用 GitHub Actions，确认 GitHub Secrets 中也有 `SUPABASE_URL`。
+3. 重新运行部署流程。
+4. 访问 `/v1/health` 查看运行时密钥状态。
+
+### 插件无法同步云端账号池
+
+1. 确认 Worker 地址填写正确。
+2. 确认 `TXZZ_CLIENT_TOKEN` 一致。
+3. 确认 Supabase 已执行 `schema.sql`。
+4. 确认 `SUPABASE_SERVICE_ROLE_KEY` 没有填错。
+
+### GitHub Actions 部署失败
+
+1. 查看 Actions 日志中的缺失密钥提示。
+2. 确认 `CLOUDFLARE_ACCOUNT_ID` 和 `CLOUDFLARE_API_TOKEN` 有效。
+3. 确认 `wrangler.toml` 中的 Worker 名称没有冲突。
+4. 本地运行 `npm run check` 排除语法错误。
+
+## 安全与隐私
+
+- 不要提交 `.dev.vars`。
+- 不要提交 Supabase `service_role`。
+- 不要提交完整账号密码、二维码凭证、token 或 deviceId。
+- 不要在插件前端硬编码服务端管理密钥。
+- 已经暴露过的密钥应立即轮换。
+- 账号凭据应由 Worker 使用 `TXZZ_CREDENTIAL_KEY` 加密后保存。
+
+## 版本说明
+
+| 组件 | 版本 |
+| --- | --- |
+| Worker | `1.0.1` |
+| Wrangler | `4.98.0` |
+| Node.js | `22.16.0` 及以上 |
 
 ## 更新日志
 
-2026-06-09 19:27 【优化】优化 GitHub Actions 部署流程，新增必填 GitHub Secrets 存在性检查；部署失败时可更快定位 Cloudflare 或 Supabase 相关密钥是否缺失，不影响 Worker 业务接口逻辑。
-2026-06-09 19:39 【修复】修复 GitHub Actions 读取不到环境密钥的问题，部署任务显式绑定 `VITE_SUPABASE_URL` 环境，兼容当前已配置在环境下的 Worker 部署密钥。
-2026-06-09 19:54 【修复】修复 Worker 发布后运行时密钥未注入的问题，GitHub Actions 改为使用 `wrangler deploy --secrets-file` 将代码和密钥随同版本一起发布，避免部署成功但线上环境变量为空。
-2026-06-09 20:00 【优化】启用 Cloudflare Worker 默认 `workers.dev` 部署域名，文档明确 GitHub 只负责部署触发，插件远程地址应优先填写默认 Worker 域名而不是自定义域名。
-2026-06-09 20:15 【新增】GitHub Actions 新增默认 Worker 地址输出步骤，部署完成后自动在 Summary 中显示 `workers.dev` 完整访问地址，方便直接复制到插件远程配置。
-2026-06-09 20:22 【修复】默认 Worker 地址输出步骤改为非阻断执行，并优先从 Wrangler 部署输出中解析 `workers.dev` 地址，避免地址查询失败导致整体部署显示失败。
-2026-06-09 20:28 【修复】修复默认 Worker 地址输出脚本中 `require` 与顶层 `await` 混用导致的 Node 模块格式冲突，脚本改为异步函数包裹执行。
-2026-06-09 21:35 【新增】新增客户端账号上传接口，支持插件把本地完整账号上传为云端加密凭证；默认访问地址改为 `https://txzzsecure.lsy20.top`，并优化坏凭证账号轮换策略。
+2026-06-09 19:27 【优化】优化 GitHub Actions 部署流程，新增必填 GitHub Secrets 存在性检查。
+2026-06-09 19:39 【修复】修复 GitHub Actions 读取不到环境密钥的问题，部署任务显式绑定指定环境。
+2026-06-09 19:54 【修复】修复 Worker 发布后运行时密钥未注入的问题，GitHub Actions 改为使用 `wrangler deploy --secrets-file` 发布。
+2026-06-09 20:15 【新增】GitHub Actions 新增默认 Worker 地址输出步骤，部署完成后在 Summary 中显示访问地址。
+2026-06-09 21:35 【新增】新增客户端账号上传接口，支持插件把本地账号上传为云端加密凭证。
+2026-06-12 23:36 【优化】重写仓库 README 为 GitHub 风格文档，补充部署流程、目录结构、插件配置、常见问题、安全说明和版本说明。

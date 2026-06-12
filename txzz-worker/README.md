@@ -1,61 +1,124 @@
-# 糖心志者远程账号池 Worker
+# 远程账号池 Worker
 
-这个目录是「糖心志者」插件的服务端中间层。插件只和 Cloudflare Worker 通信；完整权限账号、Supabase `service_role`、目标接口 AES key、账号池种子都放在 Worker Secrets 或 GitHub Secrets 里，避免出现在 Chrome 扩展前端代码中。
+远程账号池 Worker 是「糖心志者」插件的服务端中间层，负责账号凭据加密保存、云端账号摘要读取、账号轮换、完整详情请求和插件接口鉴权。
 
-## 架构
+## 项目介绍
 
-```mermaid
-flowchart LR
-  A["Chrome 扩展"] -->|"X-TXZZ-Client-Token"| B["Cloudflare Worker"]
-  B -->|"service_role"| C["Supabase REST"]
-  B -->|"加密请求"| D["CTF 靶场 API"]
-  C --> B
-  D --> B
-  B --> A
+浏览器插件不适合直接保存完整账号凭据和服务端密钥。本 Worker 将敏感逻辑移到 Cloudflare，使用 Supabase 存储加密后的账号凭据，并向插件返回脱敏数据。插件只需要保存 Worker 地址和调用令牌，即可使用云端账号池能力。
+
+## 环境要求
+
+- Node.js `22.16.0` 及以上
+- npm `10.0.0` 及以上
+- Wrangler `4.98.0`
+- Cloudflare Worker
+- Supabase
+- PowerShell `5.1` 及以上
+- 文件编码：UTF-8
+
+## 核心功能
+
+- `/v1/health` 健康检查和运行时密钥状态诊断
+- `/v1/accounts` 云端账号池读取和管理写入
+- `/v1/accounts/client-upload` 插件侧本地账号上传云端
+- `/v1/accounts/seed` 从环境变量写入默认账号池
+- `/v1/accounts/verify` 验证指定账号可用性
+- `/v1/movie/full-detail` 获取完整详情并返回给插件
+- `/v1/media/proxy` 可选媒体代理接口
+- 账号凭据 AES-GCM 加密保存
+- 云端账号状态摘要脱敏返回
+- 固定账号、随机轮换和坏账号跳过策略
+
+## 项目目录结构
+
+```text
+txzz-worker/
+├── src/
+│   └── worker.js          # Worker 主入口和全部接口逻辑
+├── schema.sql             # Supabase 表结构和索引
+├── package.json           # npm 脚本和固定依赖版本
+├── wrangler.toml          # Cloudflare Worker 配置
+├── .dev.vars.example      # 本地环境变量示例
+└── README.md              # 当前文档
 ```
 
-Worker 负责：
+## 安装依赖
 
-- 从 Supabase 读取远程账号池，并只返回脱敏后的账号状态。
-- 使用 `TXZZ_CREDENTIAL_KEY` 对完整账号凭据做 AES-GCM 加密后再写入 Supabase。
-- 在服务端通过账号密码、已缓存 token 或二维码凭证恢复完整权限账号会话。
-- 在服务端拉取 `/movie/detail`、按需执行金币视频购买，再把完整播放详情返回给插件。
-- 缓存完整播放详情，减少重复登录和重复购买流程。
+```powershell
+cd .\txzz-worker
+npm install
+npm run check
+```
+
+`package.json` 已固定依赖：
+
+```json
+{
+  "devDependencies": {
+    "wrangler": "4.98.0"
+  }
+}
+```
 
 ## Supabase 初始化
 
-在 Supabase SQL Editor 执行：
+1. 打开 Supabase 控制台。
+2. 进入目标项目。
+3. 打开 SQL Editor。
+4. 复制 `schema.sql` 全部内容。
+5. 粘贴并执行。
 
-```sql
--- 直接粘贴 txzz-worker/schema.sql 的内容执行
-```
+主要数据表：
 
-表结构：
+| 表名 | 用途 |
+| --- | --- |
+| `txzz_accounts` | 保存云端账号摘要和加密凭据。 |
+| `txzz_full_detail_cache` | 缓存完整详情结果，降低重复请求。 |
+| `txzz_audit_logs` | 保存账号验证、详情获取和接口调用审计记录。 |
 
-- `txzz_accounts`：远程账号池，`secret_box` 为服务端加密后的凭据。
-- `txzz_full_detail_cache`：完整视频详情缓存。
-- `txzz_audit_logs`：账号验证、详情拉取、购买流程的审计记录。
+## 环境变量
 
-RLS 已启用，且不创建 anon 读写策略。Worker 使用 `service_role` 访问。
+### 必填变量
+
+| 变量名 | 说明 |
+| --- | --- |
+| `SUPABASE_URL` | Supabase 项目地址。 |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase 服务端密钥，只能放在 Worker 侧。 |
+| `TXZZ_API_AES_KEY` | 目标接口加密密钥。 |
+| `TXZZ_CREDENTIAL_KEY` | 账号凭据加密口令，建议使用高强度随机值。 |
+| `TXZZ_ADMIN_TOKEN` | 管理接口令牌。 |
+| `TXZZ_CLIENT_TOKEN` | 插件调用接口令牌。 |
+
+### 可选变量
+
+| 变量名 | 说明 |
+| --- | --- |
+| `TXZZ_PROXY_SIGNING_KEY` | 媒体代理签名密钥。 |
+| `TXZZ_SEED_ACCOUNTS_JSON` | 默认账号池 JSON，用于 `/v1/accounts/seed`。 |
+| `TXZZ_TARGET_BASE_URL` | 目标接口基础地址，默认在 `wrangler.toml` 中配置。 |
+| `TXZZ_API_VERSION` | 接口版本号。 |
+| `TXZZ_API_SOURCE` | 接口来源标识。 |
+| `TXZZ_CACHE_TTL_SECONDS` | 完整详情缓存时间。 |
+| `TXZZ_PROXY_MEDIA` | 是否启用媒体代理。 |
 
 ## 本地配置
 
 复制示例文件：
 
 ```powershell
-Copy-Item .\txzz-worker\.dev.vars.example .\txzz-worker\.dev.vars
+Copy-Item .\.dev.vars.example .\.dev.vars
 ```
 
-`.dev.vars` 仅用于本地测试，不要提交。字段含义：
+`.dev.vars` 示例：
 
 ```text
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=只放 Supabase service_role
-TXZZ_API_AES_KEY=靶场前端接口 AES key
+SUPABASE_SERVICE_ROLE_KEY=只填写 Supabase service_role
+TXZZ_API_AES_KEY=目标接口加密密钥
 TXZZ_CREDENTIAL_KEY=随机高强度账号凭据加密口令
 TXZZ_ADMIN_TOKEN=随机高强度管理令牌
 TXZZ_CLIENT_TOKEN=随机高强度插件调用令牌
-TXZZ_SEED_ACCOUNTS_JSON=[{"id":"full-lsyhook","label":"lsyhook 完整权限","username":"lsyhook","password":"完整权限账号密码"}]
+TXZZ_SEED_ACCOUNTS_JSON=[{"id":"full-demo","label":"示例完整账号","username":"demo","password":"demo-password"}]
 ```
 
 生成随机令牌示例：
@@ -67,9 +130,6 @@ node -e "console.log(crypto.randomUUID() + crypto.randomUUID())"
 ## 本地运行
 
 ```powershell
-cd .\txzz-worker
-npm install
-npm run check
 npm run dev
 ```
 
@@ -77,15 +137,6 @@ npm run dev
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8787/v1/health
-```
-
-种子账号写入 Supabase：
-
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Headers @{ "X-TXZZ-Admin-Token" = "<TXZZ_ADMIN_TOKEN>" } `
-  -Uri http://127.0.0.1:8787/v1/accounts/seed
 ```
 
 同步账号池：
@@ -96,33 +147,45 @@ Invoke-RestMethod `
   -Uri http://127.0.0.1:8787/v1/accounts
 ```
 
-上传二维码凭证账号：
+写入种子账号：
 
 ```powershell
 Invoke-RestMethod `
   -Method Post `
   -Headers @{ "X-TXZZ-Admin-Token" = "<TXZZ_ADMIN_TOKEN>" } `
-  -ContentType "application/json; charset=utf-8" `
-  -Body (@{
-    account = @{
-      id = "full-qr-自定义短编号"
-      label = "QR credential 自定义短编号"
-      qrcode = "<二维码解析出的凭证内容>"
-      enabled = $true
-      source = "qrcode"
-      notes = "二维码凭证账号，Worker 服务端加密保存"
-    }
-  } | ConvertTo-Json -Depth 5) `
-  -Uri http://127.0.0.1:8787/v1/accounts
+  -Uri http://127.0.0.1:8787/v1/accounts/seed
 ```
 
-二维码凭证会写入 `secret_box` 并由 Worker 使用 `TXZZ_CREDENTIAL_KEY` 加密。`GET /v1/accounts` 只返回 `hasQrcode` 等脱敏摘要，不返回凭证明文。
+## 部署到 Cloudflare
 
-## GitHub 部署到 Cloudflare
+设置生产环境密钥：
 
-仓库已包含 `.github/workflows/deploy-txzz-worker.yml`。推送 `main` 或 `master` 且修改 `txzz-worker/**` 时会自动部署，也可以手动运行 workflow。
+```powershell
+npx wrangler secret put SUPABASE_URL
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+npx wrangler secret put TXZZ_API_AES_KEY
+npx wrangler secret put TXZZ_CREDENTIAL_KEY
+npx wrangler secret put TXZZ_ADMIN_TOKEN
+npx wrangler secret put TXZZ_CLIENT_TOKEN
+npx wrangler secret put TXZZ_PROXY_SIGNING_KEY
+npx wrangler secret put TXZZ_SEED_ACCOUNTS_JSON
+```
 
-GitHub 仓库 Secrets 需要配置：
+发布：
+
+```powershell
+npm run deploy
+```
+
+发布后访问：
+
+```text
+https://<你的服务名>.<你的账号>.workers.dev/v1/health
+```
+
+## GitHub Actions 部署
+
+如果通过仓库根目录的 GitHub Actions 部署，需要在 GitHub Secrets 中配置：
 
 ```text
 CLOUDFLARE_API_TOKEN
@@ -137,94 +200,194 @@ TXZZ_PROXY_SIGNING_KEY
 TXZZ_SEED_ACCOUNTS_JSON
 ```
 
-工作流当前绑定 `VITE_SUPABASE_URL` 环境，会先检查该环境下的必填 GitHub Secrets 是否存在，再通过 `wrangler deploy --secrets-file` 将代码和运行时密钥一起发布到 Cloudflare Worker。Worker 配置已开启 `workers_dev = true`，部署后优先使用 Cloudflare 默认 `*.workers.dev` 域名；工作流会在 Summary 中输出完整默认 Worker 地址。GitHub 只负责触发部署，不提供可运行的 Worker 接口域名。也可以本地通过 Wrangler 手动设置：
+部署成功后，在 Actions Summary 中查看 Worker 地址。
 
-```powershell
-cd .\txzz-worker
-npx wrangler secret put SUPABASE_URL
-npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-npx wrangler secret put TXZZ_API_AES_KEY
-npx wrangler secret put TXZZ_CREDENTIAL_KEY
-npx wrangler secret put TXZZ_ADMIN_TOKEN
-npx wrangler secret put TXZZ_CLIENT_TOKEN
-npx wrangler secret put TXZZ_SEED_ACCOUNTS_JSON
+## 接口说明
+
+### `GET /v1/health`
+
+用于健康检查和运行时诊断。
+
+返回内容包含：
+
+- 服务状态
+- 构建标识
+- 必填密钥是否存在
+- 当前缓存和配置摘要
+
+不会返回任何密钥明文。
+
+### `GET /v1/accounts`
+
+读取云端账号池摘要。
+
+请求头：
+
+```text
+X-TXZZ-Client-Token: <TXZZ_CLIENT_TOKEN>
 ```
 
-然后部署：
+返回内容只包含脱敏摘要，例如账号 ID、显示名称、状态、是否有密码、是否有二维码凭证，不返回凭证明文。
 
-```powershell
-npx wrangler deploy
+### `POST /v1/accounts`
+
+管理端写入或更新云端账号。
+
+请求头：
+
+```text
+X-TXZZ-Admin-Token: <TXZZ_ADMIN_TOKEN>
 ```
 
-部署完成后先种子：
+示例：
 
 ```powershell
 Invoke-RestMethod `
   -Method Post `
   -Headers @{ "X-TXZZ-Admin-Token" = "<TXZZ_ADMIN_TOKEN>" } `
-  -Uri https://<your-worker>.workers.dev/v1/accounts/seed
+  -ContentType "application/json; charset=utf-8" `
+  -Body (@{
+    account = @{
+      id = "full-demo"
+      label = "示例账号"
+      username = "demo"
+      password = "demo-password"
+      enabled = $true
+      source = "password"
+      notes = "示例账号"
+    }
+  } | ConvertTo-Json -Depth 5) `
+  -Uri http://127.0.0.1:8787/v1/accounts
 ```
 
-## 插件配置
+### `POST /v1/accounts/client-upload`
 
-打开「糖心志者」面板，进入「账号池」：
+插件侧上传本地账号到云端。
 
-1. `Worker URL` 填 Worker 地址，当前默认使用 `https://txzzsecure.lsy20.top`。
-2. `Client Token` 填 `TXZZ_CLIENT_TOKEN`。
-3. `Admin Token` 只在需要从插件上传账号时填写；日常使用可以留空。
-4. 点击「保存远程配置」和「同步远程」。
-
-后续视频详情命中 `/movie/detail` 时，插件会优先调用：
+请求头：
 
 ```text
-POST /v1/movie/full-detail
+X-TXZZ-Client-Token: <TXZZ_CLIENT_TOKEN>
+X-TXZZ-Admin-Token: <TXZZ_ADMIN_TOKEN>
 ```
 
-Worker 在服务端完成完整账号验证、完整详情获取和金币视频购买判断，插件端只接收可用于沙箱验证的详情结果。
+上传成功后，账号凭据会加密保存，插件再次同步时只看到云端摘要。
+云端摘要会返回 `hasPassword`、`hasQrcode`、`hasToken` 等凭据类型标记，但不会返回任何凭证明文。
 
-账号轮换规则：
+### `POST /v1/accounts/seed`
 
-- `accountMode=cloud`：Worker 随机轮换云端账号；如果插件带了 `accountId`，该账号只作为优先尝试对象，失败后继续尝试其他启用账号。
-- `accountMode=cloud-fixed`：Worker 只使用指定 `accountId`，适合固定测试某个云端账号。
-- `accountMode=cloud-first`：插件优先使用云端，云端失败后再走本地兜底。
-- 状态为 `error` 的云端账号不会参与默认随机轮换，避免旧密钥坏凭证反复阻塞播放链路；固定账号模式仍会返回明确错误，方便定位需要重新上传的账号。
+将 `TXZZ_SEED_ACCOUNTS_JSON` 中的默认账号写入 Supabase。
 
-## 接口
+请求头：
 
 ```text
-GET  /v1/health
-GET  /v1/accounts
-POST /v1/accounts
-POST /v1/accounts/client-upload
-POST /v1/accounts/seed
-POST /v1/accounts/verify
-POST /v1/movie/full-detail
-GET  /v1/media/proxy
+X-TXZZ-Admin-Token: <TXZZ_ADMIN_TOKEN>
 ```
 
-鉴权：
+### `POST /v1/accounts/verify`
 
-- 插件读取和视频详情接口：`X-TXZZ-Client-Token`
-- 本地账号上传云端接口：`X-TXZZ-Client-Token`
-- 管理写入账号、种子、验证接口：`X-TXZZ-Admin-Token`
+验证指定账号是否可用。
 
-## 安全注意
+请求头：
 
-- 已经在聊天、日志或截图里出现过的 Supabase `service_role` 和完整账号密码，都应视为泄露并轮换。
-- 不要把 `.dev.vars`、`evidence/`、浏览器 profile、CDP 输出提交到 GitHub。
-- 开源版本建议保留 Worker 远程模式，关闭或移除前端本地 fallback 里的真实靶场 AES key。
-- 该项目只用于授权 CTF 隔离靶场，不用于真实站点、真实支付或非授权账号。
+```text
+X-TXZZ-Admin-Token: <TXZZ_ADMIN_TOKEN>
+```
+
+### `POST /v1/movie/full-detail`
+
+由插件调用，用于获取完整详情。
+
+请求头：
+
+```text
+X-TXZZ-Client-Token: <TXZZ_CLIENT_TOKEN>
+```
+
+常见请求字段：
+
+```json
+{
+  "movieId": "12345",
+  "accountMode": "cloud",
+  "accountId": ""
+}
+```
+
+账号模式：
+
+| 模式 | 说明 |
+| --- | --- |
+| `cloud` | 云端随机轮换，选中账号只作为优先尝试对象。 |
+| `cloud-fixed` | 固定使用指定账号。 |
+| `cloud-first` | 云端优先，插件侧可进行本地兜底。 |
+
+### `GET /v1/media/proxy`
+
+可选媒体代理接口。是否启用由 `TXZZ_PROXY_MEDIA` 控制。
+
+## 账号加密说明
+
+账号凭据不会明文写入 Supabase。Worker 使用 `TXZZ_CREDENTIAL_KEY` 对凭据进行 AES-GCM 加密，写入字段为 `secret_box`。插件读取账号池时，只能获得脱敏摘要。
+
+建议：
+
+- `TXZZ_CREDENTIAL_KEY` 使用独立高强度随机值。
+- 密钥泄露后立即轮换。
+- 轮换密钥后，需要重新上传云端账号凭据。
+
+## 常见问题排查
+
+### `/v1/health` 提示缺少密钥
+
+1. 确认本地 `.dev.vars` 或 Cloudflare Secrets 已配置对应变量。
+2. 重新运行 `npm run dev` 或重新部署 Worker。
+3. 如果使用 GitHub Actions，确认 GitHub Secrets 没有漏填。
+
+### `/v1/accounts` 返回鉴权失败
+
+1. 检查请求头是否包含 `X-TXZZ-Client-Token`。
+2. 确认请求头值和 `TXZZ_CLIENT_TOKEN` 一致。
+3. 确认部署后密钥已经注入到 Worker。
+
+### 账号池为空
+
+1. 确认 Supabase 已执行 `schema.sql`。
+2. 调用 `/v1/accounts/seed` 写入默认账号。
+3. 检查 `TXZZ_SEED_ACCOUNTS_JSON` 是否为合法 JSON。
+4. 检查 `txzz_accounts` 表中是否有启用账号。
+
+### 完整详情获取失败
+
+1. 检查账号摘要状态是否为可用。
+2. 如果固定账号失败，切换为云端随机轮换再试。
+3. 查看 Worker 日志中的接口错误。
+4. 检查目标接口基础地址和接口密钥配置是否正确。
+
+## 安全与隐私
+
+- `.dev.vars` 不要提交到 GitHub。
+- Supabase `service_role` 只能放在 Worker 侧。
+- 管理令牌不要写入插件源码。
+- 完整账号密码、二维码凭证、token、deviceId 不要写入公开仓库。
+- 日志中不要打印完整凭据。
+- 已经暴露过的密钥应立即轮换。
+
+## 版本说明
+
+| 组件 | 版本 |
+| --- | --- |
+| Worker | `1.0.1` |
+| Wrangler | `4.98.0` |
+| Node.js | `22.16.0` 及以上 |
+| 数据库 | Supabase |
 
 ## 更新日志
 
-2026-06-09 16:08 【新增】新增远程 Worker 二维码凭证账号恢复能力，账号池可保存 `qrcode` 凭证并在服务端通过 `/user/findQrcode` 获取完整权限会话；同步固定 Wrangler 依赖版本为 `4.98.0`，便于后续部署环境稳定复现。
-2026-06-09 16:21 【修复】优化云端账号轮换策略，非固定模式下选中账号只作为优先尝试对象，失败后继续轮换其他启用账号；新增 `cloud-fixed` 固定账号模式，便于固定测试指定云端账号。
-2026-06-09 19:27 【优化】优化 GitHub Actions 部署流程，新增必填 GitHub Secrets 存在性检查；部署失败时可更快定位 Cloudflare 或 Supabase 相关密钥是否缺失，不影响 Worker 业务接口逻辑。
-2026-06-09 19:39 【修复】修复 GitHub Actions 读取不到环境密钥的问题，部署任务显式绑定 `VITE_SUPABASE_URL` 环境，兼容当前已配置在环境下的 Worker 部署密钥。
-2026-06-09 19:47 【新增】新增 `/v1/health` 运行时诊断字段，返回构建标识和必填密钥存在状态，便于排查自定义域名是否指向最新 Worker 以及运行时密钥是否注入成功；诊断结果不返回任何密钥明文。
-2026-06-09 19:54 【修复】修复 Worker 发布后运行时密钥未注入的问题，GitHub Actions 改为使用 `wrangler deploy --secrets-file` 将代码和密钥随同版本一起发布，避免部署成功但线上环境变量为空。
-2026-06-09 20:00 【优化】启用 Cloudflare Worker 默认 `workers.dev` 部署域名，文档明确 GitHub 只负责部署触发，插件远程地址应优先填写默认 Worker 域名而不是自定义域名。
-2026-06-09 20:15 【新增】GitHub Actions 新增默认 Worker 地址输出步骤，部署完成后自动在 Summary 中显示 `workers.dev` 完整访问地址，方便直接复制到插件远程配置。
-2026-06-09 20:22 【修复】默认 Worker 地址输出步骤改为非阻断执行，并优先从 Wrangler 部署输出中解析 `workers.dev` 地址，避免地址查询失败导致整体部署显示失败。
-2026-06-09 20:28 【修复】修复默认 Worker 地址输出脚本中 `require` 与顶层 `await` 混用导致的 Node 模块格式冲突，脚本改为异步函数包裹执行。
-2026-06-09 21:35 【新增】新增 `/v1/accounts/client-upload` 客户端上传接口，插件可将本地完整账号上传为云端加密凭证；同时默认轮换跳过 `error` 状态账号，坏二维码凭证不会阻塞其他云端账号。
+2026-06-09 16:08 【新增】新增远程 Worker 二维码凭证账号恢复能力，账号池可保存二维码凭证并在服务端恢复账号会话；同步固定 Wrangler 依赖版本为 `4.98.0`。
+2026-06-09 16:21 【修复】优化云端账号轮换策略，非固定模式下选中账号只作为优先尝试对象，失败后继续轮换其他启用账号；新增 `cloud-fixed` 固定账号模式。
+2026-06-09 19:47 【新增】新增 `/v1/health` 运行时诊断字段，返回构建标识和必填密钥存在状态，诊断结果不返回任何密钥明文。
+2026-06-09 19:54 【修复】修复 Worker 发布后运行时密钥未注入的问题，GitHub Actions 改为使用 `wrangler deploy --secrets-file` 发布。
+2026-06-09 21:35 【新增】新增 `/v1/accounts/client-upload` 客户端上传接口，插件可将本地完整账号上传为云端加密凭证；同时默认轮换跳过错误状态账号。
+2026-06-12 23:36 【优化】重写 Worker README 为 GitHub 风格文档，补充环境变量、部署教程、接口说明、账号加密说明、常见问题、安全说明和版本说明。
+2026-06-13 00:13 【修复】优化云端账号摘要兼容逻辑，确保上传后的账号返回凭据类型标记；`/v1/accounts/client-upload` 明确要求同时携带 Client Token 和 Admin Token。

@@ -16,8 +16,6 @@ const REQUIRED_SECRET_KEYS = [
   "SUPABASE_SERVICE_ROLE_KEY",
   "TXZZ_API_AES_KEY",
   "TXZZ_CREDENTIAL_KEY",
-  "TXZZ_ADMIN_TOKEN",
-  "TXZZ_CLIENT_TOKEN",
   "TXZZ_SEED_ACCOUNTS_JSON"
 ];
 
@@ -158,6 +156,7 @@ function publicUserInfo(info = null) {
 function publicAccount(row = {}) {
   const secret = row.secret_box || {};
   const has = secret.has || {};
+  const legacyPlain = secret && typeof secret === "object" && !secret.data && !secret.iv ? secret : {};
   return {
     id: row.id,
     label: row.label,
@@ -169,9 +168,9 @@ function publicAccount(row = {}) {
     notes: row.notes || "",
     lastVerifiedAt: row.last_verified_at || "",
     lastError: row.last_error || "",
-    hasPassword: Boolean(has.password),
-    hasQrcode: Boolean(has.qrcode),
-    hasToken: Boolean(has.userToken),
+    hasPassword: Boolean(has.password || legacyPlain.password),
+    hasQrcode: Boolean(has.qrcode || legacyPlain.qrcode),
+    hasToken: Boolean(has.userToken || legacyPlain.userToken || legacyPlain.token),
     tokenMasked: secret.tokenMasked || "",
     userInfo: publicUserInfo(row.user_info)
   };
@@ -820,7 +819,6 @@ async function handle(request, env, ctx) {
     return json({ ok: true, service: "txzz-secure-pool", build: BUILD_TAG, envReady: envReady(env), time: nowIso() });
   }
   if (path === "/v1/accounts" && request.method === "GET") {
-    requireClient(request, env);
     return json({ ok: true, accounts: await listAccounts(env) });
   }
   if (path === "/v1/accounts" && request.method === "POST") {
@@ -829,7 +827,6 @@ async function handle(request, env, ctx) {
     return json({ ok: true, account: await saveAccount(env, body.account || body) });
   }
   if (path === "/v1/accounts/client-upload" && request.method === "POST") {
-    requireClient(request, env);
     const body = await request.json();
     return json({ ok: true, account: await saveAccount(env, body.account || body) });
   }
@@ -846,11 +843,9 @@ async function handle(request, env, ctx) {
     return json({ ok: true, account: publicAccount(updated), session: { deviceId: session.deviceId, userInfo: session.userInfo } });
   }
   if (path === "/v1/movie/full-detail" && request.method === "POST") {
-    requireClient(request, env);
     return json(await fullDetail(env, ctx, await request.json()));
   }
   if (path === "/v1/media/proxy" && request.method === "GET") {
-    requireClient(request, env);
     return await proxyMedia(request, env);
   }
   return fail("not found", 404);
