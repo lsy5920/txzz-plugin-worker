@@ -5,12 +5,12 @@ const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,POST,OPTIONS",
-  "access-control-allow-headers": "content-type,authorization,x-txzz-client-token,x-txzz-admin-token"
+  "access-control-allow-headers": "content-type,authorization"
 };
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BUILD_TAG = "txzz-worker-20260613-0031";
+const BUILD_TAG = "txzz-worker-20260613-0118";
 const REQUIRED_SECRET_KEYS = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -187,6 +187,67 @@ function publicAccount(row = {}) {
   };
 }
 
+function firstFilled(source = {}, keys = []) {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (value !== undefined && value !== null && String(value).trim() !== "") return value;
+  }
+  return "";
+}
+
+function toFiniteNumber(value) {
+  const raw = String(value ?? "").replace(/,/g, "").trim();
+  if (!raw) return null;
+  const n = Number.parseFloat(raw.replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+function coinValueFromInfo(info = {}) {
+  const value = firstFilled(info, ["coin", "gold", "balance", "balance_income", "money", "amount", "wallet", "ticket"]);
+  return toFiniteNumber(value);
+}
+
+function accountCoinValue(account = {}, fallback = Number.POSITIVE_INFINITY) {
+  const value = coinValueFromInfo(account.user_info || account.userInfo || account.info || {});
+  return value === null ? fallback : value;
+}
+
+function compareByCoinThenName(a, b) {
+  const av = accountCoinValue(a);
+  const bv = accountCoinValue(b);
+  if (av !== bv) return av - bv;
+  return String(a.label || a.username || a.id || "").localeCompare(String(b.label || b.username || b.id || ""), "zh-CN");
+}
+
+function sortAccountsByCoin(rows = []) {
+  return [...rows].sort(compareByCoinThenName);
+}
+
+function lowestCoinRandomOrder(rows = []) {
+  const remaining = [...rows];
+  const out = [];
+  while (remaining.length) {
+    const minCoin = Math.min(...remaining.map((row) => accountCoinValue(row)));
+    const group = shuffle(remaining.filter((row) => accountCoinValue(row) === minCoin));
+    out.push(...group);
+    for (const row of group) {
+      const index = remaining.findIndex((item) => item.id === row.id);
+      if (index >= 0) remaining.splice(index, 1);
+    }
+  }
+  return out;
+}
+
+function playableDetailReady(detail = null) {
+  const normalized = normalizeFullDetail(detail);
+  return Boolean(looksPlayableLink(normalized?.play_link) || looksPlayableLink(normalized?.backup_link));
+}
+
+function isLockedCoinVideo(detail = null) {
+  const normalized = normalizeFullDetail(detail);
+  return normalized?.has_buy !== "y" && normalized?.layer_type === "money" && Number(normalized?.money || 0) > 0;
+}
+
 function slug(value) {
   return String(value || "")
     .trim()
@@ -288,29 +349,6 @@ async function audit(env, event, data = {}) {
       }])
     });
   } catch (_) {}
-}
-
-function authHeader(request) {
-  return request.headers.get("authorization") || "";
-}
-
-function bearer(request) {
-  const header = authHeader(request);
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1].trim() : "";
-}
-
-function requireClient(request, env) {
-  const expected = env.TXZZ_CLIENT_TOKEN || "";
-  if (!expected) return;
-  const token = request.headers.get("x-txzz-client-token") || bearer(request);
-  if (token !== expected) throw Object.assign(new Error("client auth failed"), { status: 401 });
-}
-
-function requireAdmin(request, env) {
-  const expected = requireEnv(env, "TXZZ_ADMIN_TOKEN");
-  const token = request.headers.get("x-txzz-admin-token") || bearer(request);
-  if (token !== expected) throw Object.assign(new Error("admin auth failed"), { status: 401 });
 }
 
 function concatBytes(a, b) {
@@ -561,7 +599,7 @@ async function acquireAccountSession(row, env, bootstrapSession = null) {
 
 async function listAccounts(env) {
   const rows = await supabase(env, "txzz_accounts?select=*&enabled=eq.true&order=created_at.asc");
-  return rows.map(publicAccount);
+  return sortAccountsByCoin(rows).map(publicAccount);
 }
 
 async function listAccountRows(env) {
@@ -711,22 +749,17 @@ async function fullDetail(env, ctx, body = {}) {
   const movieId = String(body.movieId || body.id || "").trim();
   if (!movieId) throw new Error("missing movieId");
   const bootstrap = body.bootstrapSession?.deviceId && body.bootstrapSession?.userToken ? body.bootstrapSession : null;
-  const preferredAccountId = String(body.accountId || "").trim();
-  const accountMode = String(body.accountMode || "").trim();
   const rows = await listAccountRows(env);
-  let candidates = accountMode === "cloud-fixed" && preferredAccountId
-    ? rows.filter((account) => account.id === preferredAccountId)
-    : shuffle(rows.filter(isUsableAccountRow));
-  if (preferredAccountId && accountMode !== "cloud-fixed") {
-    const preferred = rows.find((account) => account.id === preferredAccountId && isUsableAccountRow(account));
-    if (preferred) candidates = [preferred, ...candidates.filter((account) => account.id !== preferredAccountId)];
-  }
+  let candidates = sortAccountsByCoin(rows.filter(isUsableAccountRow));
   if (!candidates.length) throw new Error("remote account pool is empty");
 
   const errors = [];
+  const lockedCandidates = [];
+  const checkedAccountIds = new Set();
+
   for (const account of candidates) {
     const cached = await cacheGet(env, account.id, movieId);
-    if (cached) {
+    if (cached && playableDetailReady(cached.detail)) {
       const cachedDetail = normalizeFullDetail(cached.detail);
       const cachedSummary = normalizeFullSummary(cached.summary, cachedDetail);
       return {
@@ -742,15 +775,23 @@ async function fullDetail(env, ctx, body = {}) {
     let verified = null;
     let verifiedAccount = null;
     let detail = null;
-    let action = "direct_full_detail";
     try {
       verified = await acquireAccountSession(account, env, bootstrap);
       verifiedAccount = await updateAccountAfterVerify(env, account, verified);
       detail = normalizeFullDetail(await apiRequest("/movie/detail", { id: movieId }, verified, env));
-      if (detail?.has_buy !== "y" && detail?.layer_type === "money" && Number(detail?.money || 0) > 0) {
-        action = "buy_then_full_detail";
-        await apiRequest("/movie/doBuy", { id: movieId }, verified, env);
-        detail = normalizeFullDetail(await apiRequest("/movie/detail", { id: movieId }, verified, env));
+      checkedAccountIds.add(account.id);
+      if (isLockedCoinVideo(detail)) {
+        lockedCandidates.push({ account: verifiedAccount || account, session: verified, detail });
+        await audit(env, "movie.full_detail.locked_coin", {
+          accountId: account.id,
+          movieId,
+          ok: false,
+          meta: { coin: accountCoinValue(verifiedAccount || account, null), money: detail?.money }
+        }).catch(() => {});
+        continue;
+      }
+      if (!playableDetailReady(detail)) {
+        throw new Error("播放详情未返回可播放链接");
       }
     } catch (err) {
       const message = err?.message || String(err);
@@ -763,39 +804,95 @@ async function fullDetail(env, ctx, body = {}) {
       continue;
     }
 
-    const summary = {
+    return await finishFullDetail(env, ctx, {
       movieId,
-      action,
-      accountId: account.id,
-      accountLabel: account.label,
-      accountUser: account.username || accountName(verified?.userInfo),
-      hasBuy: detail?.has_buy,
-      layerType: detail?.layer_type,
-      money: detail?.money,
-      oldMoney: detail?.old_money,
-      balance: detail?.balance,
-      playLink: detail?.play_link,
-      backupLink: detail?.backup_link,
-      fullStat: detail?.play_link ? { url: absoluteUrl(detail.play_link, env), pending: true } : null,
-      backupStat: detail?.backup_link ? { url: absoluteUrl(detail.backup_link, env), pending: true } : null,
-      fetchedAt: nowIso(),
-      remote: true,
-      rotation: { accountId: account.id, tried: errors.length + 1, failed: errors }
-    };
-    await cacheSet(env, account.id, movieId, detail, summary);
-    ctxWaitUntilStat(ctx, env, account.id, movieId, detail, summary);
-    await audit(env, "movie.full_detail", { accountId: account.id, movieId, ok: true, meta: { action, tried: errors.length + 1 } });
-    return {
-      ok: true,
+      action: "direct_full_detail",
+      account: verifiedAccount || account,
+      session: verified,
       detail,
-      data: detail,
-      summary,
-      account: publicAccount(verifiedAccount || { ...account, status: "ok", user_info: verified?.userInfo }),
-      state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [summary] }
-    };
+      errors,
+      checkedAccountIds
+    });
   }
 
-  throw new Error(`all remote accounts failed: ${JSON.stringify(errors.slice(-5))}`);
+  if (lockedCandidates.length) {
+    const buyCandidates = lowestCoinRandomOrder(lockedCandidates.map((item) => item.account))
+      .map((account) => lockedCandidates.find((item) => item.account.id === account.id))
+      .filter(Boolean);
+    for (const item of buyCandidates) {
+      try {
+        await apiRequest("/movie/doBuy", { id: movieId }, item.session, env);
+        const detail = normalizeFullDetail(await apiRequest("/movie/detail", { id: movieId }, item.session, env));
+        if (isLockedCoinVideo(detail)) throw new Error("购买后仍显示未购买");
+        if (!playableDetailReady(detail)) throw new Error("购买后播放详情未返回可播放链接");
+        return await finishFullDetail(env, ctx, {
+          movieId,
+          action: "buy_then_full_detail",
+          account: item.account,
+          session: item.session,
+          detail,
+          errors,
+          checkedAccountIds,
+          purchaseMeta: {
+            purchasePolicy: "all_accounts_checked_then_lowest_coin",
+            purchasedByCoin: accountCoinValue(item.account, null),
+            lockedAccounts: lockedCandidates.length
+          }
+        });
+      } catch (err) {
+        const message = err?.message || String(err);
+        errors.push({ accountId: item.account.id, label: item.account.label, error: message, stage: "buy" });
+        await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(item.account.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "error", last_error: message })
+        }).catch(() => {});
+        await audit(env, "movie.full_detail.buy", { accountId: item.account.id, movieId, ok: false, message }).catch(() => {});
+      }
+    }
+  }
+
+  throw new Error(`all remote accounts failed: ${JSON.stringify(errors.slice(-8))}`);
+}
+
+async function finishFullDetail(env, ctx, options = {}) {
+  const { movieId, action, account, session, detail, errors = [], checkedAccountIds = new Set(), purchaseMeta = {} } = options;
+  const publicInfo = publicUserInfo(session?.userInfo || account?.user_info || account?.userInfo || null);
+  const summary = {
+    movieId,
+    action,
+    accountId: account.id,
+    accountLabel: account.label,
+    accountUser: account.username || accountName(publicInfo),
+    hasBuy: detail?.has_buy,
+    layerType: detail?.layer_type,
+    money: detail?.money,
+    oldMoney: detail?.old_money,
+    balance: detail?.balance,
+    playLink: detail?.play_link,
+    backupLink: detail?.backup_link,
+    fullStat: detail?.play_link ? { url: absoluteUrl(detail.play_link, env), pending: true } : null,
+    backupStat: detail?.backup_link ? { url: absoluteUrl(detail.backup_link, env), pending: true } : null,
+    fetchedAt: nowIso(),
+    remote: true,
+    rotation: {
+      accountId: account.id,
+      tried: checkedAccountIds.size || errors.length + 1,
+      failed: errors,
+      coinSort: true,
+      ...purchaseMeta
+    }
+  };
+  await cacheSet(env, account.id, movieId, detail, summary);
+  ctxWaitUntilStat(ctx, env, account.id, movieId, detail, summary);
+  await audit(env, "movie.full_detail", { accountId: account.id, movieId, ok: true, meta: { action, tried: summary.rotation.tried } });
+  return {
+    ok: true,
+    detail,
+    data: detail,
+    summary,
+    account: publicAccount({ ...account, status: "ok", user_info: publicInfo || account.user_info }),
+    state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [summary] }
+  };
 }
 
 function ctxWaitUntilStat(ctx, env, accountId, movieId, detail, summary) {
@@ -834,7 +931,6 @@ async function handle(request, env, ctx) {
     return json({ ok: true, accounts: await listAccounts(env) });
   }
   if (path === "/v1/accounts" && request.method === "POST") {
-    requireAdmin(request, env);
     const body = await request.json();
     return json({ ok: true, account: await saveAccount(env, body.account || body) });
   }
@@ -843,7 +939,6 @@ async function handle(request, env, ctx) {
     return json({ ok: true, account: await saveAccount(env, body.account || body) });
   }
   if (path === "/v1/accounts/seed" && request.method === "POST") {
-    requireAdmin(request, env);
     return json({ ok: true, accounts: await seedAccounts(env) });
   }
   if (path === "/v1/accounts/verify" && request.method === "POST") {

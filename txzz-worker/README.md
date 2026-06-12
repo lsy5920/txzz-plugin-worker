@@ -1,10 +1,10 @@
 # 远程账号池 Worker
 
-远程账号池 Worker 是「糖心志者」插件的服务端中间层，负责账号凭据加密保存、云端账号摘要读取、账号轮换、完整详情请求和插件接口鉴权。
+远程账号池 Worker 是「糖心志者」插件的服务端中间层，负责账号凭据加密保存、云端账号摘要读取、账号轮换、完整详情请求和账号权益摘要返回。
 
 ## 项目介绍
 
-浏览器插件不适合直接保存完整账号凭据和服务端密钥。本 Worker 将敏感逻辑移到 Cloudflare，使用 Supabase 存储加密后的账号凭据，并向插件返回脱敏数据。插件只需要保存 Worker 地址和调用令牌，即可使用云端账号池能力。
+浏览器插件不适合直接保存完整账号凭据和服务端密钥。本 Worker 将敏感逻辑移到 Cloudflare，使用 Supabase 存储加密后的账号凭据，并向插件返回脱敏数据。插件只需要保存 Worker 地址，即可使用云端账号池能力。
 
 ## 环境要求
 
@@ -86,8 +86,6 @@ npm run check
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase 服务端密钥，只能放在 Worker 侧。 |
 | `TXZZ_API_AES_KEY` | 目标接口加密密钥。 |
 | `TXZZ_CREDENTIAL_KEY` | 账号凭据加密口令，建议使用高强度随机值。 |
-| `TXZZ_ADMIN_TOKEN` | 管理接口令牌。 |
-| `TXZZ_CLIENT_TOKEN` | 插件调用接口令牌。 |
 
 ### 可选变量
 
@@ -116,8 +114,6 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=只填写 Supabase service_role
 TXZZ_API_AES_KEY=目标接口加密密钥
 TXZZ_CREDENTIAL_KEY=随机高强度账号凭据加密口令
-TXZZ_ADMIN_TOKEN=随机高强度管理令牌
-TXZZ_CLIENT_TOKEN=随机高强度插件调用令牌
 TXZZ_SEED_ACCOUNTS_JSON=[{"id":"full-demo","label":"示例完整账号","username":"demo","password":"demo-password"}]
 ```
 
@@ -142,9 +138,7 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/health
 同步账号池：
 
 ```powershell
-Invoke-RestMethod `
-  -Headers @{ "X-TXZZ-Client-Token" = "<TXZZ_CLIENT_TOKEN>" } `
-  -Uri http://127.0.0.1:8787/v1/accounts
+Invoke-RestMethod http://127.0.0.1:8787/v1/accounts
 ```
 
 写入种子账号：
@@ -152,7 +146,6 @@ Invoke-RestMethod `
 ```powershell
 Invoke-RestMethod `
   -Method Post `
-  -Headers @{ "X-TXZZ-Admin-Token" = "<TXZZ_ADMIN_TOKEN>" } `
   -Uri http://127.0.0.1:8787/v1/accounts/seed
 ```
 
@@ -165,8 +158,6 @@ npx wrangler secret put SUPABASE_URL
 npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler secret put TXZZ_API_AES_KEY
 npx wrangler secret put TXZZ_CREDENTIAL_KEY
-npx wrangler secret put TXZZ_ADMIN_TOKEN
-npx wrangler secret put TXZZ_CLIENT_TOKEN
 npx wrangler secret put TXZZ_PROXY_SIGNING_KEY
 npx wrangler secret put TXZZ_SEED_ACCOUNTS_JSON
 ```
@@ -194,8 +185,6 @@ SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 TXZZ_API_AES_KEY
 TXZZ_CREDENTIAL_KEY
-TXZZ_ADMIN_TOKEN
-TXZZ_CLIENT_TOKEN
 TXZZ_PROXY_SIGNING_KEY
 TXZZ_SEED_ACCOUNTS_JSON
 ```
@@ -221,30 +210,21 @@ TXZZ_SEED_ACCOUNTS_JSON
 
 读取云端账号池摘要。
 
-请求头：
+无需请求头。
 
-```text
-X-TXZZ-Client-Token: <TXZZ_CLIENT_TOKEN>
-```
-
-返回内容只包含脱敏摘要，例如账号 ID、显示名称、状态、是否有密码、是否有二维码凭证，不返回凭证明文。
+返回内容只包含脱敏摘要，例如账号 ID、显示名称、状态、是否有密码、是否有二维码凭证、普通 VIP、尤物圈和金币余额，不返回凭证明文。
 
 ### `POST /v1/accounts`
 
 管理端写入或更新云端账号。
 
-请求头：
-
-```text
-X-TXZZ-Admin-Token: <TXZZ_ADMIN_TOKEN>
-```
+无需请求头。
 
 示例：
 
 ```powershell
 Invoke-RestMethod `
   -Method Post `
-  -Headers @{ "X-TXZZ-Admin-Token" = "<TXZZ_ADMIN_TOKEN>" } `
   -ContentType "application/json; charset=utf-8" `
   -Body (@{
     account = @{
@@ -264,12 +244,7 @@ Invoke-RestMethod `
 
 插件侧上传本地账号到云端。
 
-请求头：
-
-```text
-X-TXZZ-Client-Token: <TXZZ_CLIENT_TOKEN>
-X-TXZZ-Admin-Token: <TXZZ_ADMIN_TOKEN>
-```
+无需请求头。
 
 上传成功后，账号凭据会加密保存，插件再次同步时只看到云端摘要。
 云端摘要会返回 `hasPassword`、`hasQrcode`、`hasToken` 等凭据类型标记，但不会返回任何凭证明文。
@@ -278,31 +253,17 @@ X-TXZZ-Admin-Token: <TXZZ_ADMIN_TOKEN>
 
 将 `TXZZ_SEED_ACCOUNTS_JSON` 中的默认账号写入 Supabase。
 
-请求头：
-
-```text
-X-TXZZ-Admin-Token: <TXZZ_ADMIN_TOKEN>
-```
+无需请求头。
 
 ### `POST /v1/accounts/verify`
 
-验证指定账号是否可用。
-
-请求头：
-
-```text
-X-TXZZ-Admin-Token: <TXZZ_ADMIN_TOKEN>
-```
+验证指定账号是否可用，并更新账号摘要中的普通 VIP、尤物圈和金币余额。无需请求头。
 
 ### `POST /v1/movie/full-detail`
 
 由插件调用，用于获取完整详情。
 
-请求头：
-
-```text
-X-TXZZ-Client-Token: <TXZZ_CLIENT_TOKEN>
-```
+无需请求头。
 
 常见请求字段：
 
@@ -344,11 +305,11 @@ X-TXZZ-Client-Token: <TXZZ_CLIENT_TOKEN>
 2. 重新运行 `npm run dev` 或重新部署 Worker。
 3. 如果使用 GitHub Actions，确认 GitHub Secrets 没有漏填。
 
-### `/v1/accounts` 返回鉴权失败
+### `/v1/accounts` 返回空或请求失败
 
-1. 检查请求头是否包含 `X-TXZZ-Client-Token`。
-2. 确认请求头值和 `TXZZ_CLIENT_TOKEN` 一致。
-3. 确认部署后密钥已经注入到 Worker。
+1. 确认 Supabase 已执行 `schema.sql`。
+2. 访问 `/v1/health` 查看必填变量是否齐全。
+3. 确认 `SUPABASE_URL` 和 `SUPABASE_SERVICE_ROLE_KEY` 没有填错。
 
 ### 账号池为空
 
@@ -368,7 +329,6 @@ X-TXZZ-Client-Token: <TXZZ_CLIENT_TOKEN>
 
 - `.dev.vars` 不要提交到 GitHub。
 - Supabase `service_role` 只能放在 Worker 侧。
-- 管理令牌不要写入插件源码。
 - 完整账号密码、二维码凭证、token、deviceId 不要写入公开仓库。
 - 日志中不要打印完整凭据。
 - 已经暴露过的密钥应立即轮换。
@@ -377,7 +337,7 @@ X-TXZZ-Client-Token: <TXZZ_CLIENT_TOKEN>
 
 | 组件 | 版本 |
 | --- | --- |
-| Worker | `1.0.1` |
+| Worker | `1.0.2` |
 | Wrangler | `4.98.0` |
 | Node.js | `22.16.0` 及以上 |
 | 数据库 | Supabase |
@@ -390,4 +350,5 @@ X-TXZZ-Client-Token: <TXZZ_CLIENT_TOKEN>
 2026-06-09 19:54 【修复】修复 Worker 发布后运行时密钥未注入的问题，GitHub Actions 改为使用 `wrangler deploy --secrets-file` 发布。
 2026-06-09 21:35 【新增】新增 `/v1/accounts/client-upload` 客户端上传接口，插件可将本地完整账号上传为云端加密凭证；同时默认轮换跳过错误状态账号。
 2026-06-12 23:36 【优化】重写 Worker README 为 GitHub 风格文档，补充环境变量、部署教程、接口说明、账号加密说明、常见问题、安全说明和版本说明。
-2026-06-13 00:13 【修复】优化云端账号摘要兼容逻辑，确保上传后的账号返回凭据类型标记；`/v1/accounts/client-upload` 明确要求同时携带 Client Token 和 Admin Token。
+2026-06-13 00:13 【修复】优化云端账号摘要兼容逻辑，确保上传后的账号返回凭据类型标记。
+2026-06-13 00:27 【优化】放开插件常用接口的令牌填写要求，账号同步、账号上传、账号验证和完整详情获取只需 Worker 地址；云端账号摘要补充普通 VIP、尤物圈和金币余额字段。

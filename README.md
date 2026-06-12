@@ -72,8 +72,6 @@ npx wrangler secret put SUPABASE_URL
 npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler secret put TXZZ_API_AES_KEY
 npx wrangler secret put TXZZ_CREDENTIAL_KEY
-npx wrangler secret put TXZZ_ADMIN_TOKEN
-npx wrangler secret put TXZZ_CLIENT_TOKEN
 npx wrangler secret put TXZZ_PROXY_SIGNING_KEY
 npx wrangler secret put TXZZ_SEED_ACCOUNTS_JSON
 ```
@@ -103,8 +101,6 @@ SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 TXZZ_API_AES_KEY
 TXZZ_CREDENTIAL_KEY
-TXZZ_ADMIN_TOKEN
-TXZZ_CLIENT_TOKEN
 TXZZ_PROXY_SIGNING_KEY
 TXZZ_SEED_ACCOUNTS_JSON
 ```
@@ -125,16 +121,16 @@ TXZZ_SEED_ACCOUNTS_JSON
 
 1. 进入「账号池」页。
 2. `Worker URL` 填写部署后的 Worker 地址。
-3. `Client Token` 填写 `TXZZ_CLIENT_TOKEN`。
-4. 需要上传账号时，`Admin Token` 填写 `TXZZ_ADMIN_TOKEN`。
-5. 点击「保存远程配置」。
-6. 点击「同步远程」。
+3. 选择账号来源模式。
+4. 点击「保存远程配置」。
+5. 点击「同步远程」。
+6. 本地账号可直接点击「上传云端」，不需要额外填写令牌。
 
 ## 账号池数据流
 
 ```mermaid
 flowchart LR
-  A["Chrome 插件"] -->|"Client Token"| B["Cloudflare Worker"]
+  A["Chrome 插件"] -->|"Worker 地址"| B["Cloudflare Worker"]
   B -->|"读取摘要"| C["Supabase"]
   B -->|"加密保存凭据"| C
   B -->|"服务端请求目标接口"| D["业务接口"]
@@ -174,9 +170,9 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/health
 ### 插件无法同步云端账号池
 
 1. 确认 Worker 地址填写正确。
-2. 确认 `TXZZ_CLIENT_TOKEN` 一致。
-3. 确认 Supabase 已执行 `schema.sql`。
-4. 确认 `SUPABASE_SERVICE_ROLE_KEY` 没有填错。
+2. 确认 Supabase 已执行 `schema.sql`。
+3. 确认 `SUPABASE_SERVICE_ROLE_KEY` 没有填错。
+4. 访问 `/v1/health` 查看必填变量是否齐全。
 
 ### GitHub Actions 部署失败
 
@@ -198,7 +194,7 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/health
 
 | 组件 | 版本 |
 | --- | --- |
-| Worker | `1.0.1` |
+| Worker | `1.0.2` |
 | Wrangler | `4.98.0` |
 | Node.js | `22.16.0` 及以上 |
 
@@ -210,3 +206,4 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/health
 2026-06-09 20:15 【新增】GitHub Actions 新增默认 Worker 地址输出步骤，部署完成后在 Summary 中显示访问地址。
 2026-06-09 21:35 【新增】新增客户端账号上传接口，支持插件把本地账号上传为云端加密凭证。
 2026-06-12 23:36 【优化】重写仓库 README 为 GitHub 风格文档，补充部署流程、目录结构、插件配置、常见问题、安全说明和版本说明。
+2026-06-13 00:27 【优化】简化插件侧远程账号池配置，取消普通同步和上传流程中的令牌填写要求；文档同步说明账号卡片会展示普通 VIP、尤物圈和金币余额。
