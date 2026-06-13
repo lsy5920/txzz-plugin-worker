@@ -10,7 +10,7 @@ const JSON_HEADERS = {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BUILD_TAG = "txzz-worker-20260613-0118";
+const BUILD_TAG = "txzz-worker-20260614-0106";
 const REQUIRED_SECRET_KEYS = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -39,6 +39,17 @@ function envReady(env) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function isNonAccountFailureMessage(message = "") {
+  const text = String(message || "");
+  return /当前视频已经下架|视频已经下架|播放详情未返回可播放链接|购买后播放详情未返回|购买后仍显示未购买|\/movie\/detail failed|movie\/detail failed|\/movie\/doBuy failed|movie\/doBuy failed|\/system\/menu did not return visitor token|system\/menu did not return visitor token|fetch failed|network|timeout/i.test(text);
+}
+
+function isCredentialFailureMessage(message = "") {
+  const text = String(message || "");
+  if (!text || isNonAccountFailureMessage(text)) return false;
+  return /account has no usable credential|授权过期|saved token invalid|账号身份不匹配|account login failed|账号密码登录失败|qrcode restore failed|账号凭证找回失败|\/user\/info failed|user\/info failed|findByAccount|findQrcode/i.test(text);
 }
 
 function mask(value, head = 10, tail = 6) {
@@ -618,7 +629,10 @@ function shuffle(items) {
 }
 
 function isUsableAccountRow(row = {}) {
-  return row.enabled !== false && row.status !== "error";
+  if (row.enabled === false) return false;
+  if (row.status !== "error") return true;
+  if (isCredentialFailureMessage(row.last_error || "")) return false;
+  return Boolean(row.last_verified_at || row.user_info);
 }
 
 async function getAccount(env, accountId = "") {
@@ -798,10 +812,17 @@ async function fullDetail(env, ctx, body = {}) {
     } catch (err) {
       const message = err?.message || String(err);
       errors.push({ accountId: account.id, label: account.label, error: message });
-      await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(account.id)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: "error", last_error: message })
-      }).catch(() => {});
+      if (isCredentialFailureMessage(message)) {
+        await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(account.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "error", last_error: message })
+        }).catch(() => {});
+      } else {
+        await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(account.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ last_error: message })
+        }).catch(() => {});
+      }
       await audit(env, "movie.full_detail", { accountId: account.id, movieId, ok: false, message });
       continue;
     }
@@ -844,10 +865,17 @@ async function fullDetail(env, ctx, body = {}) {
       } catch (err) {
         const message = err?.message || String(err);
         errors.push({ accountId: item.account.id, label: item.account.label, error: message, stage: "buy" });
-        await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(item.account.id)}`, {
-          method: "PATCH",
-          body: JSON.stringify({ status: "error", last_error: message })
-        }).catch(() => {});
+        if (isCredentialFailureMessage(message)) {
+          await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(item.account.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ status: "error", last_error: message })
+          }).catch(() => {});
+        } else {
+          await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(item.account.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ last_error: message })
+          }).catch(() => {});
+        }
         await audit(env, "movie.full_detail.buy", { accountId: item.account.id, movieId, ok: false, message }).catch(() => {});
       }
     }
