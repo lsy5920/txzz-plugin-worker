@@ -10,7 +10,7 @@ const JSON_HEADERS = {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BUILD_TAG = "txzz-worker-20260614-0106";
+const BUILD_TAG = "txzz-worker-20260704-2200";
 const REQUIRED_SECRET_KEYS = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -949,6 +949,50 @@ async function proxyMedia(request, env) {
   return new Response(res.body, { status: res.status, headers });
 }
 
+/** 统计账号池基本数字，供 /v1/accounts/stats 使用 */
+async function accountPoolStats(env) {
+  const rows = await supabase(env, "txzz_accounts?select=id,enabled,status,last_verified_at,user_info&order=created_at.asc");
+  const total = rows.length;
+  const enabled = rows.filter((r) => r.enabled !== false);
+  const ok = enabled.filter((r) => r.status === "ok");
+  const error = enabled.filter((r) => r.status === "error");
+  const unverified = enabled.filter((r) => !r.status || r.status === "idle");
+  const coinValues = enabled.map((r) => accountCoinValue(r)).filter((v) => v !== Number.POSITIVE_INFINITY);
+  const totalCoin = coinValues.reduce((s, v) => s + v, 0);
+  return {
+    total,
+    enabled: enabled.length,
+    ok: ok.length,
+    error: error.length,
+    unverified: unverified.length,
+    totalCoin: Number.isFinite(totalCoin) ? Number(totalCoin.toFixed(2)) : null,
+    avgCoin: coinValues.length ? Number((totalCoin / coinValues.length).toFixed(2)) : null,
+    time: nowIso()
+  };
+}
+
+/** 汇总服务整体状态，供 /v1/status 使用 */
+async function detailedStatus(env) {
+  const envStatus = envReady(env);
+  const allConfigured = Object.values(envStatus).every(Boolean);
+  let accountStats = null;
+  let accountError = null;
+  try {
+    accountStats = await accountPoolStats(env);
+  } catch (err) {
+    accountError = err?.message || String(err);
+  }
+  return {
+    ok: allConfigured && !accountError,
+    service: "txzz-secure-pool",
+    build: BUILD_TAG,
+    env: envStatus,
+    accounts: accountStats,
+    accountError: accountError || undefined,
+    time: nowIso()
+  };
+}
+
 async function handle(request, env, ctx) {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: JSON_HEADERS });
   const url = new URL(request.url);
@@ -983,6 +1027,12 @@ async function handle(request, env, ctx) {
   }
   if (path === "/v1/media/proxy" && request.method === "GET") {
     return await proxyMedia(request, env);
+  }
+  if (path === "/v1/accounts/stats" && request.method === "GET") {
+    return json({ ok: true, stats: await accountPoolStats(env) });
+  }
+  if (path === "/v1/status" && request.method === "GET") {
+    return json(await detailedStatus(env));
   }
   return fail("not found", 404);
 }
