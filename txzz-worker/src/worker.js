@@ -1022,14 +1022,14 @@ async function handle(request, env, ctx) {
     const updated = await updateAccountAfterVerify(env, account, session);
     return json({ ok: true, account: publicAccount(updated), session: { deviceId: session.deviceId, userInfo: session.userInfo } });
   }
+  if (path === "/v1/accounts/stats" && request.method === "GET") {
+    return json({ ok: true, stats: await accountPoolStats(env) });
+  }
   if (path === "/v1/movie/full-detail" && request.method === "POST") {
     return json(await fullDetail(env, ctx, await request.json()));
   }
   if (path === "/v1/media/proxy" && request.method === "GET") {
     return await proxyMedia(request, env);
-  }
-  if (path === "/v1/accounts/stats" && request.method === "GET") {
-    return json({ ok: true, stats: await accountPoolStats(env) });
   }
   if (path === "/v1/status" && request.method === "GET") {
     return json(await detailedStatus(env));
