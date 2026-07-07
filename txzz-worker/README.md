@@ -219,6 +219,8 @@ TXZZ_SEED_ACCOUNTS_JSON
 - `summary`：用户可读的整体说明。
 - `checks`：分项检查列表，包含运行密钥、数据库连接、账号池数量、可用账号、异常账号和待验证账号。
 - `suggestions`：下一步处理建议。
+- `nextActions`：结构化快捷动作，包含动作编号、按钮文案、优先级和处理说明，方便插件直接展示。
+- `accountsSummary`：账号池摘要，包含总数、启用数、可用数、异常数、待验证数和平均金币。
 
 示例返回：
 
@@ -230,7 +232,23 @@ TXZZ_SEED_ACCOUNTS_JSON
     "score": 79,
     "summary": "云端服务可访问，但仍有账号池细节建议处理。",
     "checks": [],
-    "suggestions": []
+    "suggestions": [],
+    "nextActions": [
+      {
+        "id": "verify-accounts",
+        "label": "验证云端账号",
+        "priority": "medium",
+        "detail": "在插件账号池页面点击账号检查，确认账号凭据是否仍然可用。"
+      }
+    ],
+    "accountsSummary": {
+      "total": 3,
+      "enabled": 3,
+      "ok": 2,
+      "error": 0,
+      "unverified": 1,
+      "avgCoin": 12.5
+    }
   }
 }
 ```
@@ -399,7 +417,7 @@ Invoke-RestMethod `
 
 | 组件 | 版本 |
 | --- | --- |
-| Worker | `1.1.0` |
+| Worker | `1.2.0` |
 | Wrangler | `4.98.0` |
 | Node.js | `22.16.0` 及以上 |
 | 数据库 | Supabase |
@@ -424,3 +442,4 @@ Invoke-RestMethod `
 2026-07-07 23:33 【新增】新增 `/v1/diagnostics` 智能体检端点，汇总运行密钥、数据库连接、账号池数量、可用账号、异常账号和待验证账号分项结果，并返回体检分数与下一步建议；同步升级 Worker 到 `1.1.0`，构建标识更新为 `txzz-worker-20260707-2333`。
 2026-07-07 23:48 【优化】补充插件侧体检快捷处理说明，插件可基于 `/v1/diagnostics` 结果复制体检报告、同步账号池或跳转处理异常账号，服务端接口保持兼容不变。
 2026-07-07 23:53 【优化】补充插件侧上次体检结果本地记忆说明，设置页再次打开时可按 Worker 地址自动展示最近体检状态，并支持清除历史体检记录；Worker 接口无需变更。
+2026-07-08 02:42 【优化】升级 Worker 到 `1.2.0`，`/v1/diagnostics` 新增结构化 `nextActions` 和 `accountsSummary`，插件可直接展示下一步处理动作和账号池摘要；构建标识更新为 `txzz-worker-20260708-0235`。
