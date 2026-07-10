@@ -9,11 +9,14 @@ TXZZ_API_VERSION = "4.76"
 TXZZ_API_SOURCE = "Apple Computer, Inc."
 TXZZ_CACHE_TTL_SECONDS = "600"
 TXZZ_PROXY_MEDIA = "false"
+TXZZ_SUPABASE_TIMEOUT_MS = "9000"
+TXZZ_TARGET_TIMEOUT_MS = "12000"
 
-# Set these with `wrangler secret put`, never commit real values:
+# 以下变量必须通过 `wrangler secret put` 配置，严禁提交真实值：
 # SUPABASE_URL
 # SUPABASE_SERVICE_ROLE_KEY
 # TXZZ_API_AES_KEY
 # TXZZ_CREDENTIAL_KEY
-# TXZZ_PROXY_SIGNING_KEY
+# 以下变量为可选项：
+# TXZZ_ACCESS_TOKEN（可选，仅供运维脚本额外调用）
 # TXZZ_SEED_ACCOUNTS_JSON

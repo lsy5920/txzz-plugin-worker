@@ -1,6 +1,10 @@
 node_modules/
 txzz-worker/node_modules/
 txzz-worker/.dev.vars
+txzz-worker/.wrangler-check/
+txzz-worker/.wrangler/
+txzz-worker/worker-secrets.json
+txzz-worker/deploy-output.txt
 .env
 .env.*
 *.log

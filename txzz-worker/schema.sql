@@ -35,6 +35,40 @@ create table if not exists public.txzz_audit_logs (
   created_at timestamptz not null default now()
 );
 
+-- 跨 Worker 实例的金币购买互斥锁，避免同一视频被并发重复购买。
+create table if not exists public.txzz_purchase_locks (
+  movie_id text primary key,
+  owner text not null,
+  locked_at timestamptz not null default now()
+);
+
+-- 尝试获取购买锁；旧锁超过指定秒数后允许新请求安全接管。
+create or replace function public.txzz_try_acquire_purchase_lock(
+  p_movie_id text,
+  p_owner text,
+  p_ttl_seconds integer default 45
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  affected_rows integer;
+begin
+  insert into public.txzz_purchase_locks (movie_id, owner, locked_at)
+  values (p_movie_id, p_owner, now())
+  on conflict (movie_id) do update
+    set owner = excluded.owner,
+        locked_at = excluded.locked_at
+    where public.txzz_purchase_locks.locked_at
+      < now() - make_interval(secs => greatest(p_ttl_seconds, 5));
+
+  get diagnostics affected_rows = row_count;
+  return affected_rows = 1;
+end;
+$$;
+
 create or replace function public.txzz_touch_updated_at()
 returns trigger
 language plpgsql
@@ -53,6 +87,12 @@ for each row execute procedure public.txzz_touch_updated_at();
 alter table public.txzz_accounts enable row level security;
 alter table public.txzz_full_detail_cache enable row level security;
 alter table public.txzz_audit_logs enable row level security;
+alter table public.txzz_purchase_locks enable row level security;
 
--- The Worker uses the Supabase service_role key, which bypasses RLS.
--- Do not create anon read/write policies for these tables.
+revoke all on function public.txzz_try_acquire_purchase_lock(text, text, integer) from public;
+revoke all on function public.txzz_try_acquire_purchase_lock(text, text, integer) from anon;
+revoke all on function public.txzz_try_acquire_purchase_lock(text, text, integer) from authenticated;
+grant execute on function public.txzz_try_acquire_purchase_lock(text, text, integer) to service_role;
+
+-- Worker 使用可绕过行级安全策略的 Supabase service_role 密钥访问数据。
+-- 严禁为这些数据表创建匿名读写策略。

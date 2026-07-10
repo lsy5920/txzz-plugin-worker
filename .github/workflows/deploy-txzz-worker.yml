@@ -1,4 +1,4 @@
-name: Deploy TXZZ Worker
+name: 部署糖心志者云端服务
 
 on:
   push:
@@ -12,29 +12,31 @@ on:
 
 jobs:
   deploy:
-    name: Deploy Cloudflare Worker
-    runs-on: ubuntu-latest
+    name: 部署 Cloudflare Worker
+    runs-on: ubuntu-24.04
     environment: VITE_SUPABASE_URL
     defaults:
       run:
         working-directory: txzz-worker
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 检出代码
+        uses: actions/checkout@v4.2.2
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4.4.0
         with:
-          node-version: 22
+          node-version: 22.16.0
+          cache: npm
+          cache-dependency-path: txzz-worker/package-lock.json
 
-      - name: Install dependencies
-        run: npm install
+      - name: 安装锁定依赖
+        run: npm ci
 
-      - name: Check Worker syntax
+      - name: 执行语法与自动化测试
         run: npm run check
 
-      - name: Check GitHub secrets
+      - name: 检查 GitHub 密钥
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -42,7 +44,6 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TXZZ_API_AES_KEY: ${{ secrets.TXZZ_API_AES_KEY }}
           TXZZ_CREDENTIAL_KEY: ${{ secrets.TXZZ_CREDENTIAL_KEY }}
-          TXZZ_SEED_ACCOUNTS_JSON: ${{ secrets.TXZZ_SEED_ACCOUNTS_JSON }}
         run: |
           node - <<'NODE'
           const required = [
@@ -51,17 +52,16 @@ jobs:
             "SUPABASE_URL",
             "SUPABASE_SERVICE_ROLE_KEY",
             "TXZZ_API_AES_KEY",
-            "TXZZ_CREDENTIAL_KEY",
-            "TXZZ_SEED_ACCOUNTS_JSON"
+            "TXZZ_CREDENTIAL_KEY"
           ];
           const missing = required.filter((key) => !process.env[key]);
           if (missing.length) {
-            throw new Error(`Missing GitHub Secrets: ${missing.join(", ")}`);
+            throw new Error(`缺少 GitHub 密钥：${missing.join(", ")}`);
           }
-          console.log("GitHub Secrets presence check passed.");
+          console.log("GitHub 密钥完整性检查通过。");
           NODE
 
-      - name: Deploy with Worker secrets
+      - name: 使用运行密钥部署 Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -69,7 +69,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TXZZ_API_AES_KEY: ${{ secrets.TXZZ_API_AES_KEY }}
           TXZZ_CREDENTIAL_KEY: ${{ secrets.TXZZ_CREDENTIAL_KEY }}
-          TXZZ_PROXY_SIGNING_KEY: ${{ secrets.TXZZ_PROXY_SIGNING_KEY }}
+          TXZZ_ACCESS_TOKEN: ${{ secrets.TXZZ_ACCESS_TOKEN }}
           TXZZ_SEED_ACCOUNTS_JSON: ${{ secrets.TXZZ_SEED_ACCOUNTS_JSON }}
         run: |
           node - <<'NODE'
@@ -78,17 +78,17 @@ jobs:
             "SUPABASE_URL",
             "SUPABASE_SERVICE_ROLE_KEY",
             "TXZZ_API_AES_KEY",
-            "TXZZ_CREDENTIAL_KEY",
-            "TXZZ_SEED_ACCOUNTS_JSON"
+            "TXZZ_CREDENTIAL_KEY"
           ];
           const missing = required.filter((key) => !process.env[key]);
           if (missing.length) {
-            throw new Error(`Missing GitHub Secrets: ${missing.join(", ")}`);
+            throw new Error(`缺少 GitHub 密钥：${missing.join(", ")}`);
           }
           const secrets = Object.fromEntries(
             [
               ...required,
-              "TXZZ_PROXY_SIGNING_KEY"
+              "TXZZ_ACCESS_TOKEN",
+              "TXZZ_SEED_ACCOUNTS_JSON"
             ]
               .filter((key) => process.env[key])
               .map((key) => [key, process.env[key]])
@@ -98,7 +98,7 @@ jobs:
           trap 'rm -f worker-secrets.json' EXIT
           npx wrangler deploy --secrets-file worker-secrets.json | tee deploy-output.txt
 
-      - name: Print default Worker URL
+      - name: 输出默认 Worker 地址
         continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -120,7 +120,7 @@ jobs:
             const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/subdomain`, { headers });
             const data = await res.json();
             if (!res.ok || !data?.result?.subdomain) {
-              console.log(`Cloudflare workers.dev subdomain query failed: ${JSON.stringify(data)}`);
+              console.log(`Cloudflare 默认子域名查询失败：${JSON.stringify(data)}`);
               fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## 默认 Worker 地址\n\n本次未能自动读取，请在 Cloudflare Worker 页面复制 `workers.dev` 地址。\n");
               return;
             }

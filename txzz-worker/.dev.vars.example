@@ -2,5 +2,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=replace-with-service-role-key
 TXZZ_API_AES_KEY=replace-with-target-api-aes-key
 TXZZ_CREDENTIAL_KEY=replace-with-random-credential-encryption-secret
-TXZZ_PROXY_SIGNING_KEY=replace-with-random-proxy-signing-secret
-TXZZ_SEED_ACCOUNTS_JSON=[{"id":"full-demo","label":"示例完整账号","username":"demo","password":"replace-locally","notes":"本地示例账号"}]
+# 可选：仅供运维脚本额外调用；最新版插件已内置访问校验密钥，无需用户填写。
+# TXZZ_ACCESS_TOKEN=replace-with-optional-operations-token
+# 可选：仅在需要通过种子接口初始化账号池时取消注释，并替换全部示例凭据。
+# TXZZ_SEED_ACCOUNTS_JSON=[{"id":"full-demo","label":"示例完整账号","username":"demo","password":"replace-locally","notes":"本地示例账号"}]

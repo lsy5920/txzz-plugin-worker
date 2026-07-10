@@ -1,22 +1,31 @@
 "use strict";
 
+import {
+  HttpError,
+  createRequestId,
+  publicError,
+  readJsonBody,
+  requireAccess,
+  secureResponse
+} from "./security.js";
+
 const DEFAULT_ACCOUNT_ID = "full-lsyhook";
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,POST,OPTIONS",
-  "access-control-allow-headers": "content-type,authorization"
+  "access-control-allow-headers": "content-type,authorization,x-txzz-access-token",
+  "access-control-max-age": "86400"
 };
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BUILD_TAG = "txzz-worker-20260708-0235";
+const BUILD_TAG = "txzz-worker-20260710-1010";
 const REQUIRED_SECRET_KEYS = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
   "TXZZ_API_AES_KEY",
-  "TXZZ_CREDENTIAL_KEY",
-  "TXZZ_SEED_ACCOUNTS_JSON"
+  "TXZZ_CREDENTIAL_KEY"
 ];
 
 function json(data, status = 200) {
@@ -39,6 +48,19 @@ function envReady(env) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+/** 为数据库和目标站请求设置统一超时，避免异常网络长期占用 Worker。 */
+async function fetchWithTimeout(input, options = {}, timeoutMs = 10000) {
+  const timeout = Math.max(1000, Math.min(Number(timeoutMs) || 10000, 30000));
+  try {
+    return await fetch(input, { ...options, signal: options.signal || AbortSignal.timeout(timeout) });
+  } catch (err) {
+    if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+      throw new Error(`请求超时（${timeout} 毫秒）`);
+    }
+    throw err;
+  }
 }
 
 function isNonAccountFailureMessage(message = "") {
@@ -75,11 +97,24 @@ function looksPlayableLink(value) {
   return /(?:\.m3u8|\.mp4|\/m3u8\/|\/h5\/m3u8\/|\/vod\/|\/video\/|\/media\/|\/link\/)/i.test(text);
 }
 
+/**
+ * 判断明确的播放字段是否已经返回内容。
+ * VIP 线路可能是无扩展名签名地址；为避免误扣金币，只排除空值与常见占位值。
+ */
+function hasReturnedPlayLink(value) {
+  if (typeof value !== "string") return false;
+  const text = value.trim();
+  return Boolean(text && !/^(?:null|undefined|false|none|nil|0|n|no|暂无|无|未购买|未解锁)$/i.test(text));
+}
+
 function collectPlayableLinks(value, bucket = [], trail = []) {
   if (!value || bucket.length >= 16) return bucket;
   if (typeof value === "string") {
     const keyHint = trail.join(".").toLowerCase();
-    if (looksPlayableLink(value) && /play|backup|m3u8|mp4|video|media|source|src|url|link|file/.test(keyHint)) {
+    const explicitPlaybackField = /play|backup|m3u8|mp4|video|media|source|src|link|file/.test(keyHint);
+    const genericUrlField = /url/.test(keyHint);
+    // 嵌套线路也可能是无扩展名签名地址；普通 url 字段仍要求具备明确视频特征，避免把封面当成线路。
+    if ((explicitPlaybackField && hasReturnedPlayLink(value)) || (genericUrlField && looksPlayableLink(value))) {
       bucket.push({ key: keyHint, url: value.trim() });
     }
     return bucket;
@@ -116,7 +151,7 @@ function normalizeFullDetail(detail = null) {
     detail.src,
     detail.source,
     detail.file
-  ].find(looksPlayableLink);
+  ].find(hasReturnedPlayLink);
   const directBackup = [
     detail.backup_link,
     detail.backupLink,
@@ -124,21 +159,22 @@ function normalizeFullDetail(detail = null) {
     detail.backupUrl,
     detail.second_play_link,
     detail.secondPlayLink
-  ].find(looksPlayableLink);
-  const playLink = detail.play_link || directPlay || links.find((item) => /play|m3u8|mp4|video|media|source|src|url|link|file/.test(item.key))?.url || "";
-  const backupLink = detail.backup_link || directBackup || links.find((item) => /backup|second|spare|mirror/.test(item.key))?.url || "";
+  ].find(hasReturnedPlayLink);
+  // 必须先使用通过有效性判断的字段，不能让 "null" 等真值占位字符串覆盖其他真实线路。
+  const playLink = directPlay || links.find((item) => /play|m3u8|mp4|video|media|source|src|url|link|file/.test(item.key))?.url || "";
+  const backupLink = directBackup || links.find((item) => /backup|second|spare|mirror/.test(item.key))?.url || "";
   return {
     ...detail,
-    play_link: playLink || detail.play_link || "",
-    backup_link: backupLink || detail.backup_link || ""
+    play_link: playLink,
+    backup_link: backupLink
   };
 }
 
 function normalizeFullSummary(summary = {}, detail = null) {
   return {
     ...summary,
-    playLink: summary.playLink || detail?.play_link || "",
-    backupLink: summary.backupLink || detail?.backup_link || ""
+    playLink: hasReturnedPlayLink(summary.playLink) ? summary.playLink : detail?.play_link || "",
+    backupLink: hasReturnedPlayLink(summary.backupLink) ? summary.backupLink : detail?.backup_link || ""
   };
 }
 
@@ -253,26 +289,46 @@ function lowestCoinRandomOrder(rows = []) {
 
 function playableDetailReady(detail = null) {
   const normalized = normalizeFullDetail(detail);
-  return Boolean(looksPlayableLink(normalized?.play_link) || looksPlayableLink(normalized?.backup_link));
+  return Boolean(hasReturnedPlayLink(normalized?.play_link) || hasReturnedPlayLink(normalized?.backup_link));
 }
 
 function isLockedCoinVideo(detail = null) {
   const normalized = normalizeFullDetail(detail);
+  // VIP 等账号即使 has_buy 不是 y，也可能已经直接拿到播放地址；有地址时严禁触发购买。
+  if (playableDetailReady(normalized)) return false;
   return normalized?.has_buy !== "y" && normalized?.layer_type === "money" && Number(normalized?.money || 0) > 0;
 }
 
+/** 生成稳定短哈希，避免中文用户名被清洗为空后全部落到同一个账号编号。 */
+function shortStableHash(value) {
+  let hash = 0x811c9dc5;
+  for (const char of String(value || "")) {
+    const codePoint = char.codePointAt(0) || 0;
+    hash ^= codePoint;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
 function slug(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
+  const normalized = String(value || "").trim().normalize("NFKC").toLowerCase();
+  const ascii = normalized
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
+  return ascii || (normalized ? `u-${shortStableHash(normalized)}` : "");
 }
 
 function normalizeAccount(raw = {}) {
   const username = String(raw.username || raw.account_name || "").trim();
-  const id = String(raw.id || (username ? `full-${slug(username)}` : `full-${Date.now()}`));
+  const requestedId = String(raw.id || "").trim();
+  const requestedSlug = slug(requestedId);
+  const usernameSlug = slug(username);
+  const id = requestedSlug
+    ? (requestedId === requestedSlug ? requestedId : `full-${requestedSlug}`)
+    : usernameSlug
+      ? `full-${usernameSlug}`
+      : `full-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
   return {
     id,
     label: String(raw.label || username || id || "完整权限账号").trim(),
@@ -321,7 +377,16 @@ async function encryptSecret(value, env) {
 }
 
 async function decryptSecret(box, env) {
-  if (!box?.iv || !box?.data) return {};
+  if (!box || typeof box !== "object") return {};
+  // 兼容早期明文结构；下次保存时会自动迁移为 AES-GCM 密文。
+  if (!box.iv || !box.data) {
+    return {
+      password: String(box.password || ""),
+      qrcode: String(box.qrcode || ""),
+      deviceId: String(box.deviceId || ""),
+      userToken: String(box.userToken || box.token || "")
+    };
+  }
   const key = await importAesGcmKey(requireEnv(env, "TXZZ_CREDENTIAL_KEY"));
   const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromBase64(box.iv) }, key, fromBase64(box.data));
   return JSON.parse(dec.decode(plain));
@@ -329,7 +394,7 @@ async function decryptSecret(box, env) {
 
 async function supabase(env, path, options = {}) {
   const url = `${requireEnv(env, "SUPABASE_URL").replace(/\/+$/, "")}/rest/v1/${path}`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     ...options,
     headers: {
       apikey: requireEnv(env, "SUPABASE_SERVICE_ROLE_KEY"),
@@ -338,7 +403,7 @@ async function supabase(env, path, options = {}) {
       prefer: "return=representation",
       ...(options.headers || {})
     }
-  });
+  }, Number(env.TXZZ_SUPABASE_TIMEOUT_MS || 9000));
   const text = await res.text();
   let data = null;
   if (text) {
@@ -453,7 +518,7 @@ async function apiRequestRaw(endpoint, data, session, env) {
     driver: true
   };
   const body = await encryptJson(payload, env);
-  const res = await fetch(`${(env.TXZZ_TARGET_BASE_URL || "https://txh068.com").replace(/\/+$/, "")}/h5${endpoint}`, {
+  const res = await fetchWithTimeout(`${(env.TXZZ_TARGET_BASE_URL || "https://txh068.com").replace(/\/+$/, "")}/h5${endpoint}`, {
     method: "POST",
     headers: {
       "content-type": "text/plain",
@@ -463,7 +528,7 @@ async function apiRequestRaw(endpoint, data, session, env) {
       "version": env.TXZZ_API_VERSION || "4.76"
     },
     body
-  });
+  }, Number(env.TXZZ_TARGET_TIMEOUT_MS || 12000));
   const raw = await res.text();
   const parsed = await decryptText(raw, env);
   return { httpStatus: res.status, endpoint, data, response: parsed };
@@ -637,26 +702,51 @@ function isUsableAccountRow(row = {}) {
 
 async function getAccount(env, accountId = "") {
   let rows = [];
-  if (accountId) rows = await supabase(env, `txzz_accounts?select=*&id=eq.${encodeURIComponent(accountId)}&limit=1`);
-  if (!rows.length) rows = await supabase(env, `txzz_accounts?select=*&id=eq.${encodeURIComponent(DEFAULT_ACCOUNT_ID)}&limit=1`);
+  if (accountId) {
+    rows = await supabase(env, `txzz_accounts?select=*&id=eq.${encodeURIComponent(accountId)}&enabled=eq.true&limit=1`);
+    if (!rows.length) throw new HttpError("指定账号不存在或未启用", 404, "ACCOUNT_NOT_FOUND");
+  }
+  if (!rows.length) rows = await supabase(env, `txzz_accounts?select=*&id=eq.${encodeURIComponent(DEFAULT_ACCOUNT_ID)}&enabled=eq.true&limit=1`);
   if (!rows.length) rows = await supabase(env, "txzz_accounts?select=*&enabled=eq.true&order=created_at.asc&limit=1");
-  if (!rows.length) throw new Error("remote account pool is empty");
+  if (!rows.length) throw new HttpError("云端账号池为空或没有已启用账号", 409, "ACCOUNT_POOL_EMPTY");
   return rows[0];
 }
 
 async function saveAccount(env, raw) {
   const account = normalizeAccount(raw);
+  if (account.label.length > 120 || account.username.length > 160 || account.notes.length > 1000) {
+    throw new HttpError("账号名称、用户名或备注超过允许长度", 400, "ACCOUNT_FIELD_TOO_LONG");
+  }
   let existingSecret = {};
-  try {
-    const existing = await supabase(env, `txzz_accounts?select=secret_box&id=eq.${encodeURIComponent(account.id)}&limit=1`);
-    if (existing[0]?.secret_box) existingSecret = await decryptSecret(existing[0].secret_box, env);
-  } catch (_) {}
+  const existing = await supabase(env, `txzz_accounts?select=*&id=eq.${encodeURIComponent(account.id)}&limit=1`);
+  const existingRow = existing[0] || null;
+  if (existingRow?.secret_box) {
+    try {
+      existingSecret = await decryptSecret(existingRow.secret_box, env);
+    } catch (_) {
+      throw new HttpError(
+        "已有账号凭据无法解密，已停止覆盖；请确认凭据加密密钥未被更换",
+        409,
+        "CREDENTIAL_DECRYPT_FAILED"
+      );
+    }
+  }
   const secret = {
     password: account.password || existingSecret.password || "",
     qrcode: account.qrcode || existingSecret.qrcode || "",
     deviceId: account.deviceId || existingSecret.deviceId || "",
     userToken: account.userToken || existingSecret.userToken || ""
   };
+  const username = account.username || existingRow?.username || "";
+  if (!secret.password && !secret.qrcode && !(secret.deviceId && secret.userToken)) {
+    throw new HttpError("账号至少需要密码、账号凭证或完整的 token/deviceId", 400, "CREDENTIAL_REQUIRED");
+  }
+  if (secret.password && !username) {
+    throw new HttpError("密码凭据必须同时提供用户名", 400, "USERNAME_REQUIRED");
+  }
+  if (Boolean(secret.deviceId) !== Boolean(secret.userToken)) {
+    throw new HttpError("token 与 deviceId 必须同时提供", 400, "TOKEN_PAIR_REQUIRED");
+  }
   const secretBox = await encryptSecret(secret, env);
   secretBox.has = {
     password: Boolean(secret.password),
@@ -666,15 +756,15 @@ async function saveAccount(env, raw) {
   secretBox.tokenMasked = secret.userToken ? mask(secret.userToken, 12, 8) : "";
   const row = {
     id: account.id,
-    label: account.label,
-    username: account.username,
+    label: String(raw?.label || "").trim() || existingRow?.label || account.label || username || account.id,
+    username,
     role: "full",
-    enabled: account.enabled,
-    source: account.source,
+    enabled: raw?.enabled === undefined ? existingRow?.enabled !== false : account.enabled,
+    source: raw?.source ? account.source : existingRow?.source || account.source,
     secret_box: secretBox,
-    user_info: account.userInfo || null,
-    status: account.status,
-    notes: account.notes,
+    user_info: account.userInfo || existingRow?.user_info || null,
+    status: raw?.status || existingRow?.status || account.status,
+    notes: raw?.notes !== undefined ? account.notes : existingRow?.notes || account.notes,
     last_error: ""
   };
   const rows = await supabase(env, "txzz_accounts?on_conflict=id", {
@@ -739,6 +829,34 @@ async function cacheSet(env, accountId, movieId, detail, summary) {
   });
 }
 
+/**
+ * 获取单视频购买互斥锁，防止多个并发请求同时扣除不同账号金币。
+ * 锁在数据库中保存，能覆盖多个 Worker 实例并带超时自动接管能力。
+ */
+async function acquirePurchaseLock(env, movieId) {
+  const owner = crypto.randomUUID();
+  const result = await supabase(env, "rpc/txzz_try_acquire_purchase_lock", {
+    method: "POST",
+    body: JSON.stringify({
+      p_movie_id: movieId,
+      p_owner: owner,
+      p_ttl_seconds: 45
+    })
+  });
+  const acquired = Array.isArray(result) ? result[0] : result;
+  return { acquired: acquired === true, owner };
+}
+
+/** 仅释放当前请求自己持有的购买锁，避免误删后来接管的新锁。 */
+async function releasePurchaseLock(env, movieId, owner) {
+  if (!movieId || !owner) return;
+  await supabase(
+    env,
+    `txzz_purchase_locks?movie_id=eq.${encodeURIComponent(movieId)}&owner=eq.${encodeURIComponent(owner)}`,
+    { method: "DELETE" }
+  );
+}
+
 async function statM3u8Quick(link, env, timeoutMs = 2500) {
   if (!link) return null;
   const url = absoluteUrl(link, env);
@@ -763,11 +881,11 @@ async function statM3u8Quick(link, env, timeoutMs = 2500) {
 
 async function fullDetail(env, ctx, body = {}) {
   const movieId = String(body.movieId || body.id || "").trim();
-  if (!movieId) throw new Error("missing movieId");
+  if (!movieId) throw new HttpError("缺少视频编号", 400, "MOVIE_ID_REQUIRED");
   const bootstrap = body.bootstrapSession?.deviceId && body.bootstrapSession?.userToken ? body.bootstrapSession : null;
   const rows = await listAccountRows(env);
   let candidates = sortAccountsByCoin(rows.filter(isUsableAccountRow));
-  if (!candidates.length) throw new Error("remote account pool is empty");
+  if (!candidates.length) throw new HttpError("云端账号池没有可用账号", 409, "ACCOUNT_POOL_EMPTY");
 
   const errors = [];
   const lockedCandidates = [];
@@ -839,49 +957,67 @@ async function fullDetail(env, ctx, body = {}) {
   }
 
   if (lockedCandidates.length) {
-    const buyCandidates = lowestCoinRandomOrder(lockedCandidates.map((item) => item.account))
-      .map((account) => lockedCandidates.find((item) => item.account.id === account.id))
-      .filter(Boolean);
-    for (const item of buyCandidates) {
-      try {
-        await apiRequest("/movie/doBuy", { id: movieId }, item.session, env);
-        const detail = normalizeFullDetail(await apiRequest("/movie/detail", { id: movieId }, item.session, env));
-        if (isLockedCoinVideo(detail)) throw new Error("购买后仍显示未购买");
-        if (!playableDetailReady(detail)) throw new Error("购买后播放详情未返回可播放链接");
-        return await finishFullDetail(env, ctx, {
-          movieId,
-          action: "buy_then_full_detail",
-          account: item.account,
-          session: item.session,
-          detail,
-          errors,
-          checkedAccountIds,
-          purchaseMeta: {
-            purchasePolicy: "all_accounts_checked_then_lowest_coin",
-            purchasedByCoin: accountCoinValue(item.account, null),
-            lockedAccounts: lockedCandidates.length
+    const purchaseLock = await acquirePurchaseLock(env, movieId);
+    if (!purchaseLock.acquired) {
+      throw new HttpError("该视频正在由另一请求解锁，请稍后重试", 409, "PURCHASE_IN_PROGRESS");
+    }
+    try {
+      const buyCandidates = lowestCoinRandomOrder(lockedCandidates.map((item) => item.account))
+        .map((account) => lockedCandidates.find((item) => item.account.id === account.id))
+        .filter(Boolean);
+      for (const item of buyCandidates) {
+        let purchaseCompleted = false;
+        try {
+          await apiRequest("/movie/doBuy", { id: movieId }, item.session, env);
+          purchaseCompleted = true;
+          const detail = normalizeFullDetail(await apiRequest("/movie/detail", { id: movieId }, item.session, env));
+          if (isLockedCoinVideo(detail)) throw new Error("购买后仍显示未购买");
+          if (!playableDetailReady(detail)) throw new Error("购买后播放详情未返回可播放链接");
+          return await finishFullDetail(env, ctx, {
+            movieId,
+            action: "buy_then_full_detail",
+            account: item.account,
+            session: item.session,
+            detail,
+            errors,
+            checkedAccountIds,
+            purchaseMeta: {
+              purchasePolicy: "all_accounts_checked_then_lowest_coin",
+              purchasedByCoin: accountCoinValue(item.account, null),
+              lockedAccounts: lockedCandidates.length
+            }
+          });
+        } catch (err) {
+          const message = err?.message || String(err);
+          errors.push({ accountId: item.account.id, label: item.account.label, error: message, stage: "buy" });
+          if (isCredentialFailureMessage(message)) {
+            await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(item.account.id)}`, {
+              method: "PATCH",
+              body: JSON.stringify({ status: "error", last_error: message })
+            }).catch(() => {});
+          } else {
+            await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(item.account.id)}`, {
+              method: "PATCH",
+              body: JSON.stringify({ last_error: message })
+            }).catch(() => {});
           }
-        });
-      } catch (err) {
-        const message = err?.message || String(err);
-        errors.push({ accountId: item.account.id, label: item.account.label, error: message, stage: "buy" });
-        if (isCredentialFailureMessage(message)) {
-          await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(item.account.id)}`, {
-            method: "PATCH",
-            body: JSON.stringify({ status: "error", last_error: message })
-          }).catch(() => {});
-        } else {
-          await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(item.account.id)}`, {
-            method: "PATCH",
-            body: JSON.stringify({ last_error: message })
-          }).catch(() => {});
+          await audit(env, "movie.full_detail.buy", { accountId: item.account.id, movieId, ok: false, message }).catch(() => {});
+          // 上游已确认扣款后不再尝试第二个账号，避免详情刷新异常造成重复消费。
+          if (purchaseCompleted) break;
         }
-        await audit(env, "movie.full_detail.buy", { accountId: item.account.id, movieId, ok: false, message }).catch(() => {});
       }
+    } finally {
+      await releasePurchaseLock(env, movieId, purchaseLock.owner).catch(() => {});
     }
   }
 
-  throw new Error(`all remote accounts failed: ${JSON.stringify(errors.slice(-8))}`);
+  await audit(env, "movie.full_detail.all_failed", {
+    movieId,
+    ok: false,
+    message: "所有云端账号均未能获取播放详情",
+    meta: { errors: errors.slice(-8) }
+  }).catch(() => {});
+  throw new HttpError("所有云端账号均未能获取播放详情，请检查账号状态后重试", 502, "ACCOUNT_ROTATION_FAILED");
 }
 
 async function finishFullDetail(env, ctx, options = {}) {
@@ -938,11 +1074,15 @@ function ctxWaitUntilStat(ctx, env, accountId, movieId, detail, summary) {
 }
 
 async function proxyMedia(request, env) {
-  if (!isEnabled(env.TXZZ_PROXY_MEDIA, false)) return fail("media proxy disabled", 404);
+  if (!isEnabled(env.TXZZ_PROXY_MEDIA, false)) return fail("媒体代理未启用", 404);
   const url = new URL(request.url);
   const target = url.searchParams.get("url");
-  if (!target || !/^https:\/\/txh068\.com\/h5\/m3u8\/link\//.test(target)) return fail("invalid proxy url", 400);
-  const res = await fetch(target, { headers: { "user-agent": request.headers.get("user-agent") || "Mozilla/5.0" } });
+  if (!target || !/^https:\/\/txh068\.com\/h5\/m3u8\/link\//.test(target)) return fail("媒体代理地址无效", 400);
+  const res = await fetchWithTimeout(
+    target,
+    { headers: { "user-agent": request.headers.get("user-agent") || "Mozilla/5.0" } },
+    Number(env.TXZZ_TARGET_TIMEOUT_MS || 12000)
+  );
   const headers = new Headers(res.headers);
   headers.set("access-control-allow-origin", "*");
   headers.set("cache-control", "private, max-age=120");
@@ -1111,24 +1251,34 @@ async function handle(request, env, ctx) {
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
   if (path === "/" || path === "/v1/health") {
-    return json({ ok: true, service: "txzz-secure-pool", build: BUILD_TAG, envReady: envReady(env), time: nowIso() });
+    if (request.method !== "GET") throw new HttpError("请求方法不受支持", 405, "METHOD_NOT_ALLOWED");
+    const ready = Object.values(envReady(env)).every(Boolean);
+    return json({
+      ok: ready,
+      service: "txzz-secure-pool",
+      build: BUILD_TAG,
+      ready,
+      authRequired: true,
+      time: nowIso()
+    }, ready ? 200 : 503);
   }
+  await requireAccess(request, env);
   if (path === "/v1/accounts" && request.method === "GET") {
     return json({ ok: true, accounts: await listAccounts(env) });
   }
   if (path === "/v1/accounts" && request.method === "POST") {
-    const body = await request.json();
+    const body = await readJsonBody(request);
     return json({ ok: true, account: await saveAccount(env, body.account || body) });
   }
   if (path === "/v1/accounts/client-upload" && request.method === "POST") {
-    const body = await request.json();
+    const body = await readJsonBody(request);
     return json({ ok: true, account: await saveAccount(env, body.account || body) });
   }
   if (path === "/v1/accounts/seed" && request.method === "POST") {
     return json({ ok: true, accounts: await seedAccounts(env) });
   }
   if (path === "/v1/accounts/verify" && request.method === "POST") {
-    const body = await request.json();
+    const body = await readJsonBody(request);
     const account = await getAccount(env, body.accountId || "");
     const session = await acquireAccountSession(account, env, body.bootstrapSession || null);
     const updated = await updateAccountAfterVerify(env, account, session);
@@ -1138,7 +1288,7 @@ async function handle(request, env, ctx) {
     return json({ ok: true, stats: await accountPoolStats(env) });
   }
   if (path === "/v1/movie/full-detail" && request.method === "POST") {
-    return json(await fullDetail(env, ctx, await request.json()));
+    return json(await fullDetail(env, ctx, await readJsonBody(request)));
   }
   if (path === "/v1/media/proxy" && request.method === "GET") {
     return await proxyMedia(request, env);
@@ -1150,15 +1300,46 @@ async function handle(request, env, ctx) {
     const status = await detailedStatus(env);
     return json({ ok: status.ok, diagnostics: status.diagnostics, status });
   }
-  return fail("not found", 404);
+  const knownPath = [
+    "/v1/accounts",
+    "/v1/accounts/client-upload",
+    "/v1/accounts/seed",
+    "/v1/accounts/verify",
+    "/v1/accounts/stats",
+    "/v1/movie/full-detail",
+    "/v1/media/proxy",
+    "/v1/status",
+    "/v1/diagnostics"
+  ].includes(path);
+  if (knownPath) throw new HttpError("请求方法不受支持", 405, "METHOD_NOT_ALLOWED");
+  throw new HttpError("接口不存在", 404, "NOT_FOUND");
 }
 
 export default {
   async fetch(request, env, ctx) {
+    const requestId = createRequestId();
     try {
-      return await handle(request, env, ctx);
+      return secureResponse(await handle(request, env, ctx), requestId);
     } catch (err) {
-      return fail(err?.message || String(err), err?.status || 500);
+      const exposed = publicError(err, requestId);
+      if (exposed.status >= 500) {
+        console.error("糖心志者 Worker 请求失败", {
+          requestId,
+          path: new URL(request.url).pathname,
+          message: err?.message || String(err)
+        });
+      }
+      return secureResponse(json(exposed.body, exposed.status), requestId);
     }
   }
+};
+
+// 仅导出纯函数供自动化测试使用，不影响 Cloudflare Worker 默认入口。
+export {
+  buildServiceDiagnostics,
+  envReady,
+  isLockedCoinVideo,
+  normalizeAccount,
+  shortStableHash,
+  slug
 };
