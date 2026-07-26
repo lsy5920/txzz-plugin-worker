@@ -45,7 +45,6 @@ jobs:
           TXZZ_API_AES_KEY: ${{ secrets.TXZZ_API_AES_KEY }}
           TXZZ_CREDENTIAL_KEY: ${{ secrets.TXZZ_CREDENTIAL_KEY }}
         run: |
-          set -o pipefail
           node - <<'NODE'
           const required = [
             "CLOUDFLARE_API_TOKEN",
@@ -73,6 +72,7 @@ jobs:
           TXZZ_ACCESS_TOKEN: ${{ secrets.TXZZ_ACCESS_TOKEN }}
           TXZZ_SEED_ACCOUNTS_JSON: ${{ secrets.TXZZ_SEED_ACCOUNTS_JSON }}
         run: |
+          set -o pipefail
           node - <<'NODE'
           const fs = require("fs");
           const required = [
@@ -137,7 +137,7 @@ jobs:
             let lastResult = "尚未取得健康响应";
             for (let attempt = 1; attempt <= 10; attempt += 1) {
               try {
-                const response = await fetch(`${workerUrl}/v1/health?deploy-check=${Date.now()}`, {
+                const response = await fetch(`${workerUrl}/v2/health?deploy-check=${Date.now()}`, {
                   headers: { "cache-control": "no-cache" }
                 });
                 const health = await response.json();
@@ -146,7 +146,7 @@ jobs:
                   console.log(`线上构建验证通过：${workerUrl} / ${expectedBuild}`);
                   fs.appendFileSync(
                     process.env.GITHUB_STEP_SUMMARY,
-                    `## 默认 Worker 地址\n\n${workerUrl}\n\n构建 \`${expectedBuild}\` 已上线且运行密钥完整。\n`
+                    `## 默认 Worker 地址\n\n${workerUrl}\n\n构建 \`${expectedBuild}\` 已上线，运行密钥与播放 schema v2 均已就绪。\n`
                   );
                   return;
                 }

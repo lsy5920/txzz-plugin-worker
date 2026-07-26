@@ -98,12 +98,149 @@ function isLockedCoinVideo(detail = null) {
   return normalized?.has_buy !== "y" && normalized?.layer_type === "money" && Number(normalized?.money || 0) > 0;
 }
 
+function playbackProtocol(url = "") {
+  const value = String(url || "").toLowerCase();
+  if (value.includes("m3u8")) return "hls";
+  if (/\.(?:mp4|webm|m4v)(?:[?#]|$)/i.test(value)) return "progressive";
+  return "unknown";
+}
+
+function sourceHealth(stat = null) {
+  if (!stat) return { state: "unknown" };
+  return {
+    state: stat.error ? "failed" : stat.pending ? "probing" : stat.ok === false ? "degraded" : "healthy",
+    status: stat.status,
+    latencyMs: stat.latencyMs,
+    segments: stat.segments,
+    duration: stat.duration,
+    score: stat.score,
+    error: stat.error,
+    checkedAt: stat.checkedAt
+  };
+}
+
+function playbackSourceScore(source = null) {
+  if (!source?.url || source.health?.state === "failed" || source.health?.error) return -10000;
+  const explicit = Number(source.health?.score);
+  if (Number.isFinite(explicit)) return explicit;
+  let score = source.health?.state === "healthy" ? 160 : source.health?.state === "degraded" ? 80 : source.health?.state === "probing" ? 35 : 20;
+  const status = Number(source.health?.status || 0);
+  if (status >= 200 && status < 400) score += 40;
+  else if (status > 0) score -= 80;
+  score += Math.min(35, Number(source.health?.segments || 0) / 4);
+  score += Math.min(25, Number(source.health?.duration || 0) / 30);
+  const latency = Number(source.health?.latencyMs || 0);
+  if (latency > 0) score -= Math.min(30, latency / 100);
+  return score;
+}
+
+function buildPlaybackSources(detail = {}, summary = {}, absoluteUrl = (value) => String(value || "")) {
+  const normalized = normalizeFullDetail(detail) || {};
+  const rows = [
+    { id: "primary", label: "主线路", url: normalized.play_link || summary.playLink || "", stat: summary.fullStat },
+    { id: "backup", label: "备用线路", url: normalized.backup_link || summary.backupLink || "", stat: summary.backupStat }
+  ];
+  return rows
+    .map((row) => ({
+      id: row.id,
+      label: row.label,
+      url: absoluteUrl(row.url),
+      protocol: playbackProtocol(row.url),
+      health: sourceHealth(row.stat)
+    }))
+    .filter((source) => hasReturnedPlayLink(source.url));
+}
+
+function recommendedPlaybackSource(sources = []) {
+  return [...sources].sort((left, right) => {
+    const scoreDiff = playbackSourceScore(right) - playbackSourceScore(left);
+    if (scoreDiff) return scoreDiff;
+    if (left.id === "primary") return -1;
+    if (right.id === "primary") return 1;
+    return String(left.id).localeCompare(String(right.id));
+  })[0] || null;
+}
+
+function createPlaybackSession(options = {}) {
+  const {
+    movieId,
+    movieTitle,
+    detail,
+    summary = {},
+    account = {},
+    acquisition = { mode: "direct", attempts: 1 },
+    absoluteUrl = (value) => String(value || ""),
+    now = new Date(),
+    sessionId = crypto.randomUUID()
+  } = options;
+  const sources = buildPlaybackSources(detail, summary, absoluteUrl);
+  const recommended = recommendedPlaybackSource(sources);
+  const fetchedAt = now.toISOString();
+  return {
+    id: sessionId,
+    movieId: String(movieId || ""),
+    title: String(movieTitle || summary.movieTitle || summary.title || `视频 ${movieId}`),
+    phase: "ready",
+    sources,
+    decision: {
+      recommendedSourceId: recommended?.id || sources[0]?.id || "",
+      reasonCodes: recommended
+        ? [recommended.health.state === "healthy" ? "healthy-source" : "best-available-source"]
+        : ["no-playable-source"],
+      failoverAllowed: sources.length > 1
+    },
+    account: { id: account.id, label: account.label },
+    acquisition,
+    fetchedAt,
+    expiresAt: new Date(now.getTime() + 10 * 60 * 1000).toISOString()
+  };
+}
+
+function legacyResponseFromPlayback(result = {}) {
+  const session = result.session || {};
+  const primary = session.sources?.find((source) => source.id === "primary") || null;
+  const backup = session.sources?.find((source) => source.id === "backup") || null;
+  const summary = {
+    movieId: session.movieId,
+    movieTitle: session.title,
+    action: session.acquisition?.mode === "purchased" ? "buy_then_full_detail" : "direct_full_detail",
+    accountId: session.account?.id,
+    accountLabel: session.account?.label,
+    hasBuy: result.detail?.has_buy,
+    playLink: primary?.url || "",
+    backupLink: backup?.url || "",
+    fullStat: primary ? { url: primary.url, ...primary.health, pending: primary.health?.state === "probing" } : null,
+    backupStat: backup ? { url: backup.url, ...backup.health, pending: backup.health?.state === "probing" } : null,
+    fetchedAt: session.fetchedAt,
+    rotation: {
+      tried: session.acquisition?.attempts || 1,
+      failed: session.acquisition?.failed || [],
+      purchasePolicy: session.acquisition?.mode === "purchased" ? "all_accounts_checked_then_lowest_coin" : undefined
+    }
+  };
+  return {
+    ok: true,
+    detail: result.detail,
+    data: result.detail,
+    summary,
+    account: result.account,
+    state: result.state
+  };
+}
+
 export {
   collectPlayableLinks,
   hasReturnedPlayLink,
   isLockedCoinVideo,
   looksPlayableLink,
+  buildPlaybackSources,
+  createPlaybackSession,
+  legacyResponseFromPlayback,
   normalizeFullDetail,
   normalizeFullSummary,
-  playableDetailReady
+  playableDetailReady,
+  playbackProtocol,
+  playbackSourceScore,
+  recommendedPlaybackSource,
+  sourceHealth
 };

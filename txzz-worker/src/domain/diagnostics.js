@@ -1,7 +1,12 @@
 "use strict";
 
 /** 生成可直接展示给用户的服务诊断；输入只包含脱敏配置状态与账号统计。 */
-function buildServiceDiagnostics({ envStatus = {}, accountStats = null, accountError = "" } = {}) {
+function buildServiceDiagnostics({
+  envStatus = {},
+  accountStats = null,
+  accountError = "",
+  playbackSchema = { ready: true, version: 1 }
+} = {}) {
   const checks = [];
   const suggestions = [];
   const nextActions = [];
@@ -70,6 +75,14 @@ function buildServiceDiagnostics({ envStatus = {}, accountStats = null, accountE
       addSuggestion("建议空闲时逐个验证云端账号，减少播放时临时轮换等待。");
       addAction("reduce-unverified", "减少待验证账号", "low", "空闲时逐个验证云端账号，减少播放时临时轮换等待。");
     }
+  }
+
+  if (playbackSchema.ready) {
+    addCheck("playback-schema", "播放安全迁移", "ok", `播放 schema v${playbackSchema.version || 2} 已就绪。`);
+  } else {
+    addCheck("playback-schema", "播放安全迁移", "error", playbackSchema.error || "购买账本或 schema 探针尚未就绪。");
+    addSuggestion("先执行 migrations/2026-07-27-playback-v2.sql；迁移完成前直链仍可播放，但自动购买会被禁用。");
+    addAction("migrate-playback-v2", "执行播放安全迁移", "high", "在 Supabase SQL Editor 执行播放 v2 增量迁移并重新检查 /v2/health。");
   }
 
   const score = Math.max(0, checks.reduce((value, item) => {

@@ -1,6 +1,6 @@
 # 远程账号池 Worker
 
-远程账号池 Worker 是「糖心志者」插件的服务端中间层，负责账号凭据加密保存、云端账号摘要读取、账号轮换、完整详情请求和账号权益摘要返回。
+远程账号池 Worker 是「糖心志者」插件的服务端中间层，负责账号凭据加密保存、Supabase 持久化、账号轮换、v2 播放会话、购买幂等对账和服务诊断。
 
 ## 项目介绍
 
@@ -18,20 +18,22 @@
 
 ## 核心功能
 
-- `/v1/health` 健康检查和运行时密钥状态诊断
+- `/v2/health` 深度健康检查，除运行密钥外还验证播放安全迁移
+- `/v2/playback/session` 统一返回线路、决策、账号和获取摘要
+- `/v1/health` 旧健康检查兼容入口
 - `/v1/diagnostics` 智能体检，返回总分、分项检查和下一步处理建议
 - `/v1/status` 服务整体状态，包含环境变量检查结果、账号池统计和智能体检摘要
 - `/v1/accounts` 云端账号池读取和管理写入
 - `/v1/accounts/client-upload` 插件侧本地账号上传云端
 - `/v1/accounts/seed` 从环境变量写入默认账号池
 - `/v1/accounts/verify` 验证指定账号可用性
-- `/v1/movie/full-detail` 获取完整详情并返回给插件
+- `/v1/movie/full-detail` 30 天兼容适配器，调用同一 v2 播放服务并映射旧字段
 - `/v1/media/proxy` 可选媒体代理接口
 - 账号凭据 AES-GCM 加密保存
 - 云端账号状态摘要脱敏返回
-- 按金币数量升序的云端自动轮换和坏账号跳过策略
+- 有效缓存 → 全账号直链检查 → 汇总锁定账号 → 最低金币组随机一次 → 购买后原账号复核
 - 已返回主线路或备用线路时直接播放，VIP 账号不会误触发金币购买
-- Supabase 跨 Worker 实例购买互斥锁，防止并发重复扣费
+- Supabase 跨 Worker 实例购买互斥锁与五态幂等账本，防止并发和扣费后详情失败造成二次购买
 - 64 KiB 请求体限制、安全响应头、请求编号和内部错误脱敏
 - 播放购买保护和服务诊断分别维护在独立纯业务模块中，可脱离 Cloudflare 与数据库进行自动化验证
 
@@ -40,12 +42,19 @@
 ```text
 txzz-worker/
 ├── src/
-│   ├── worker.js          # Worker 主入口、账号池、持久化和上游编排
+│   ├── worker.js          # Worker 路由、账号池、缓存、上游适配与服务注入
 │   ├── security.js        # 鉴权、请求校验和安全响应
+│   ├── application/
+│   │   └── playback-service.js # v2 播放会话与唯一购买编排
+│   ├── infrastructure/
+│   │   └── purchase-ledger.js  # Supabase 五态购买幂等账本
 │   └── domain/
-│       ├── playback.js    # 线路归一化、可播放判定与金币购买保护
+│       ├── playback.js    # 线路归一化、评分、决策、v2 会话与 v1 映射
 │       └── diagnostics.js # 体检评分、检查项、建议与快捷动作
-├── test/                  # Node.js 自动化测试
+├── test/                  # Node.js 自动化测试（v1/v2、购买、防并发与安全）
+├── migrations/            # 可重复执行的 Supabase 增量迁移
+├── docs/
+│   └── playback-v2.md     # v2 契约、取源顺序、五态账本、迁移和 v1 Sunset
 ├── schema.sql             # Supabase 表结构和索引
 ├── package.json           # npm 脚本和固定依赖版本
 ├── package-lock.json      # npm 依赖锁定文件
@@ -77,8 +86,8 @@ npm run check
 1. 打开 Supabase 控制台。
 2. 进入目标项目。
 3. 打开 SQL Editor。
-4. 复制 `schema.sql` 全部内容。
-5. 粘贴并执行。
+4. 新项目复制 `schema.sql` 全部内容并执行。
+5. 已有项目执行 `migrations/2026-07-27-playback-v2.sql`；该迁移只增表、增列、增索引和 RPC，不删除旧缓存数据。
 
 主要数据表：
 
@@ -88,6 +97,9 @@ npm run check
 | `txzz_full_detail_cache` | 缓存完整详情结果，降低重复请求。 |
 | `txzz_audit_logs` | 保存账号验证、详情获取和接口调用审计记录。 |
 | `txzz_purchase_locks` | 保存短时购买互斥锁，防止同一视频并发重复扣费。 |
+| `txzz_purchase_ledger` | 保存 `pending / charged / resolved / failed_before_charge / uncertain` 五态购买账本。 |
+
+`txzz_full_detail_cache` 在 v2 中增加 `schema_version` 与 `expires_at`。如果新表或 RPC 缺失，Worker 仍允许已有直链播放，但会禁用购买，并让 `/v2/health`、诊断和部署门禁明确返回未就绪。
 
 ## 环境变量
 
@@ -221,13 +233,78 @@ TXZZ_SEED_ACCOUNTS_JSON
 
 ## 接口说明
 
-除 `GET /`、`GET /v1/health` 和 `OPTIONS` 预检外，所有接口必须携带：
+除 `GET /`、`GET /v1/health`、`GET /v2/health` 和 `OPTIONS` 预检外，所有接口必须携带：
 
 ```text
 Authorization: Bearer <插件内置密钥或可选运维附加密钥>
 ```
 
 插件会在扩展后台自动添加内置密钥，请求页面和 React 界面都不会获得密钥明文。独立脚本可使用部署方选配的 `TXZZ_ACCESS_TOKEN`，无需复用插件内置密钥。
+
+### `GET /v2/health`
+
+发布门禁使用的无鉴权深度健康检查。只有运行密钥齐全、Supabase 可访问且 `txzz_playback_schema_status()` 返回 schema v2 就绪时，`ready` 才为 `true`。响应包含当前 `build`、数据库摘要和播放 schema 状态，不返回密钥明文。
+
+### `POST /v2/playback/session`
+
+扩展 5.0.0 的唯一云端播放入口，需要 Bearer 鉴权。
+
+请求示例：
+
+```json
+{
+  "movieId": "12345",
+  "movieTitle": "示例影片",
+  "requestId": "playback-12345-uuid",
+  "forceRefresh": false,
+  "bootstrapSession": null
+}
+```
+
+- `movieId` 与 `requestId` 必填；同一个业务请求必须复用同一个 `requestId`。
+- `forceRefresh` 跳过有效详情缓存，但不绕过购买账本。
+- `bootstrapSession` 可携带页面已识别的初始详情，用于直链优先判断。
+
+响应核心结构：
+
+```json
+{
+  "ok": true,
+  "session": {
+    "id": "playback-12345-uuid",
+    "movieId": "12345",
+    "title": "示例影片",
+    "phase": "ready",
+    "sources": [
+      {
+        "id": "primary",
+        "label": "主线路",
+        "url": "https://media.example/video.m3u8",
+        "protocol": "hls",
+        "health": { "state": "healthy" }
+      }
+    ],
+    "decision": {
+      "recommendedSourceId": "primary",
+      "reason": "主线路健康且评分最高"
+    },
+    "account": { "id": "account-id", "label": "账号摘要" },
+    "acquisition": { "kind": "direct", "attempts": [] },
+    "fetchedAt": "2026-07-27T01:00:00.000Z",
+    "expiresAt": "2026-07-27T01:10:00.000Z"
+  }
+}
+```
+
+标准业务错误码：`MOVIE_ID_REQUIRED`、`ACCOUNT_POOL_EMPTY`、`PURCHASE_IN_PROGRESS`、`PURCHASE_RECONCILIATION_REQUIRED`、`PLAYBACK_UNAVAILABLE`。服务还会对缺少 `requestId`、迁移未就绪等输入或部署问题返回更具体的错误码。
+
+购买规则：
+
+1. 优先使用 schema v2 有效缓存。
+2. 逐一检查全部可用账号，只要任意账号返回主线或备用线，立即禁止购买。
+3. 汇总仍锁定的账号，从最低金币账号组随机选择一个账号尝试一次。
+4. 购买成功先把账本写为 `charged`，再用原账号刷新详情。
+5. 刷新失败进入 `uncertain`；`charged` 或 `uncertain` 只能用原账号对账，禁止自动购买第二次。
 
 ### `GET /v1/health`
 
@@ -360,7 +437,7 @@ Invoke-RestMethod `
 
 ### `POST /v1/movie/full-detail`
 
-由插件调用，用于获取完整详情。
+兼容旧扩展的完整详情入口。自 2.0.0 起，该路由调用同一个 `PlaybackService`，再把 v2 `session` 映射回旧字段，不保留第二套购买逻辑。响应带 `Deprecation: true`、`Sunset: Wed, 26 Aug 2026 00:00:00 GMT` 与 successor `Link`，兼容窗口为 30 天。
 
 需要 Bearer 鉴权。
 
@@ -384,11 +461,8 @@ Invoke-RestMethod `
 说明：
 
 - Worker 不再支持固定指定云端账号。
-- 获取播放详情失败时，会自动切换下一个云端账号。
-- Worker 先检查主线路和备用线路；只要已经拿到可播放地址就立即返回，即使 `has_buy` 不是 `y` 也不会购买，适配 VIP 直接观看场景。
-- 确实没有播放地址且仍为金币锁定时，才从金币数量最少的账号组中随机选择一个账号购买。
-- 购买前获取数据库互斥锁；其他并发请求收到可重试的 `409`，避免重复扣费。
-- 扣款接口已经成功但详情刷新异常时会立即停止，不再继续购买其他账号。
+- 账号检查、最低金币策略、数据库互斥锁和五态账本与 v2 完全共用。
+- 旧客户端无需立即修改字段，但应在 Sunset 日期前迁移到 `/v2/playback/session`。
 
 ### `GET /v1/media/proxy`
 
@@ -406,10 +480,11 @@ Invoke-RestMethod `
 
 ## 常见问题排查
 
-### `/v1/health` 返回 `ready: false`
+### `/v2/health` 返回 `ready: false`
 
 1. 确认本地 `.dev.vars` 或 Cloudflare Secrets 已配置四个必填变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`TXZZ_API_AES_KEY`、`TXZZ_CREDENTIAL_KEY`。
-2. 重新运行 `npm run dev` 或重新部署 Worker。
+2. 执行 `migrations/2026-07-27-playback-v2.sql`，确认 `txzz_playback_schema_status()` 返回 `ready: true` 和 `version: 2`。
+3. 重新运行 `npm run dev` 或重新部署 Worker。
 3. 如果使用 GitHub Actions，确认 GitHub Secrets 没有漏填。
 
 ### `/v1/diagnostics` 返回低分
@@ -463,13 +538,17 @@ Invoke-RestMethod `
 
 | 组件 | 版本 |
 | --- | --- |
-| Worker | `1.4.0` |
-| 构建标识 | `txzz-worker-20260726-2254` |
+| Worker | `2.0.0` |
+| 构建标识 | `txzz-worker-20260727-0100` |
 | Wrangler | `4.110.0` |
 | Node.js | `22.16.0` 及以上 |
 | 数据库 | Supabase |
 
 ## 更新日志
+
+[2026-07-27 01:00] 【重构】升级 Worker 到 `2.0.0`（构建 `txzz-worker-20260727-0100`）：新增 `/v2/playback/session`、`/v2/health`、统一 PlaybackService、线路评分决策和 v1 兼容映射；v1 与 v2 不再保留两套购买逻辑。
+[2026-07-27 01:00] 【安全】新增 Supabase 五态购买幂等账本与增量迁移；扣费成功先记 `charged`，详情刷新失败记 `uncertain`，两种状态只能由原账号对账并禁止二次购买。迁移缺失时允许已有直链播放，但禁用购买并让健康检查明确失败。
+[2026-07-27 01:00] 【测试】Node.js 自动化测试扩展到 19 项，覆盖有直链绝不购买、最低金币随机组、并发锁、获取锁后再次核对账本、五态账本、扣费后详情失败、v1 映射和 v2 契约；部署工作流在真正执行 Wrangler 的步骤启用 `pipefail`，发布后验证构建号、迁移和 `ready: true`。
 
 2026-06-09 16:08 【新增】新增远程 Worker 二维码凭证账号恢复能力，账号池可保存二维码凭证并在服务端恢复账号会话；同步固定 Wrangler 依赖版本为 `4.98.0`。
 2026-06-09 16:21 【修复】优化云端账号轮换策略，非固定模式下选中账号只作为优先尝试对象，失败后继续轮换其他启用账号；新增 `cloud-fixed` 固定账号模式。

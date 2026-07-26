@@ -9,13 +9,9 @@ import {
   secureResponse
 } from "./security.js";
 import { buildServiceDiagnostics } from "./domain/diagnostics.js";
-import {
-  hasReturnedPlayLink,
-  isLockedCoinVideo,
-  normalizeFullDetail,
-  normalizeFullSummary,
-  playableDetailReady
-} from "./domain/playback.js";
+import { isLockedCoinVideo } from "./domain/playback.js";
+import { createPlaybackService } from "./application/playback-service.js";
+import { createPurchaseLedgerRepository } from "./infrastructure/purchase-ledger.js";
 
 const DEFAULT_ACCOUNT_ID = "full-lsyhook";
 const JSON_HEADERS = {
@@ -28,7 +24,7 @@ const JSON_HEADERS = {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BUILD_TAG = "txzz-worker-20260726-2254";
+const BUILD_TAG = "txzz-worker-20260727-0100";
 const REQUIRED_SECRET_KEYS = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -36,8 +32,11 @@ const REQUIRED_SECRET_KEYS = [
   "TXZZ_CREDENTIAL_KEY"
 ];
 
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), { status, headers: JSON_HEADERS });
+function json(data, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { ...JSON_HEADERS, ...extraHeaders }
+  });
 }
 
 function fail(message, status = 400, extra = {}) {
@@ -449,7 +448,11 @@ async function apiRequest(endpoint, data, session, env) {
   const response = result.response || {};
   if (!result.httpStatus || result.httpStatus >= 400 || response.status !== "y") {
     const msg = response.error || response.msg || response.message || JSON.stringify(response).slice(0, 240);
-    throw new Error(`${endpoint} failed: ${msg}`);
+    const error = new Error(`${endpoint} failed: ${msg}`);
+    error.httpStatus = result.httpStatus;
+    // 收到上游完整的业务拒绝响应，才能区分“明确未扣费”和网络结果不确定。
+    error.upstreamRejected = result.httpStatus > 0 && result.httpStatus < 400 && response.status !== "y";
+    throw error;
   }
   return response.data;
 }
@@ -721,22 +724,42 @@ async function cacheGet(env, accountId, movieId) {
   const rows = await supabase(env, `txzz_full_detail_cache?select=*&account_id=eq.${encodeURIComponent(accountId)}&movie_id=eq.${encodeURIComponent(movieId)}&limit=1`);
   const row = rows[0];
   if (!row) return null;
-  if (Date.now() - Date.parse(row.cached_at || 0) > ttl * 1000) return null;
+  const expiresAt = Date.parse(row.expires_at || "");
+  if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) return null;
+  if (!Number.isFinite(expiresAt) && Date.now() - Date.parse(row.cached_at || 0) > ttl * 1000) return null;
   return row;
 }
 
 async function cacheSet(env, accountId, movieId, detail, summary) {
-  await supabase(env, "txzz_full_detail_cache?on_conflict=account_id,movie_id", {
+  const cachedAt = nowIso();
+  const expiresAt = new Date(Date.now() + Number(env.TXZZ_CACHE_TTL_SECONDS || 600) * 1000).toISOString();
+  const write = (row) => supabase(env, "txzz_full_detail_cache?on_conflict=account_id,movie_id", {
     method: "POST",
     headers: { prefer: "resolution=merge-duplicates,return=representation" },
-    body: JSON.stringify([{
-      account_id: accountId,
-      movie_id: movieId,
-      detail,
-      summary,
-      cached_at: nowIso()
-    }])
+    body: JSON.stringify([row])
   });
+  const baseRow = { account_id: accountId, movie_id: movieId, detail, summary, cached_at: cachedAt };
+  try {
+    await write({ ...baseRow, schema_version: 2, expires_at: expiresAt });
+    return true;
+  } catch (error) {
+    // 迁移窗口内兼容旧缓存表；缓存写入失败也不能阻止已经获得的直链播放。
+    if (/schema_version|expires_at|column/i.test(error?.message || "")) {
+      await write(baseRow).catch(() => {});
+    }
+    return false;
+  }
+}
+
+async function markAccountFailure(env, account, error, credentialFailure = false) {
+  const message = error?.message || String(error);
+  await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(account.id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      ...(credentialFailure ? { status: "error" } : {}),
+      last_error: message
+    })
+  }).catch(() => {});
 }
 
 /**
@@ -770,6 +793,7 @@ async function releasePurchaseLock(env, movieId, owner) {
 async function statM3u8Quick(link, env, timeoutMs = 2500) {
   if (!link) return null;
   const url = absoluteUrl(link, env);
+  const startedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -779,209 +803,50 @@ async function statM3u8Quick(link, env, timeoutMs = 2500) {
     return {
       url,
       status: response.status,
+      ok: response.ok && durations.length > 0,
+      latencyMs: Date.now() - startedAt,
       segments: durations.length,
-      duration: Number(durations.reduce((sum, item) => sum + item, 0).toFixed(3))
+      duration: Number(durations.reduce((sum, item) => sum + item, 0).toFixed(3)),
+      checkedAt: nowIso()
     };
   } catch (err) {
-    return { url, error: err?.name === "AbortError" ? `timeout ${timeoutMs}ms` : err?.message || String(err) };
+    return {
+      url,
+      error: err?.name === "AbortError" ? `timeout ${timeoutMs}ms` : err?.message || String(err),
+      latencyMs: Date.now() - startedAt,
+      checkedAt: nowIso()
+    };
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function fullDetail(env, ctx, body = {}) {
-  const movieId = String(body.movieId || body.id || "").trim();
-  if (!movieId) throw new HttpError("缺少视频编号", 400, "MOVIE_ID_REQUIRED");
-  const bootstrap = body.bootstrapSession?.deviceId && body.bootstrapSession?.userToken ? body.bootstrapSession : null;
-  const rows = await listAccountRows(env);
-  let candidates = sortAccountsByCoin(rows.filter(isUsableAccountRow));
-  if (!candidates.length) throw new HttpError("云端账号池没有可用账号", 409, "ACCOUNT_POOL_EMPTY");
-
-  const errors = [];
-  const lockedCandidates = [];
-  const checkedAccountIds = new Set();
-
-  for (const account of candidates) {
-    const cached = await cacheGet(env, account.id, movieId);
-    if (cached && playableDetailReady(cached.detail)) {
-      const cachedDetail = normalizeFullDetail(cached.detail);
-      const cachedSummary = normalizeFullSummary(cached.summary, cachedDetail);
-      return {
-        ok: true,
-        detail: cachedDetail,
-        data: cachedDetail,
-        summary: { ...cachedSummary, cacheHit: true, remote: true, rotation: { accountId: account.id, tried: errors.length + 1 } },
-        account: publicAccount(account),
-        state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [cachedSummary] }
-      };
-    }
-
-    let verified = null;
-    let verifiedAccount = null;
-    let detail = null;
-    try {
-      verified = await acquireAccountSession(account, env, bootstrap);
-      verifiedAccount = await updateAccountAfterVerify(env, account, verified);
-      detail = normalizeFullDetail(await apiRequest("/movie/detail", { id: movieId }, verified, env));
-      checkedAccountIds.add(account.id);
-      if (isLockedCoinVideo(detail)) {
-        lockedCandidates.push({ account: verifiedAccount || account, session: verified, detail });
-        await audit(env, "movie.full_detail.locked_coin", {
-          accountId: account.id,
-          movieId,
-          ok: false,
-          meta: { coin: accountCoinValue(verifiedAccount || account, null), money: detail?.money }
-        }).catch(() => {});
-        continue;
-      }
-      if (!playableDetailReady(detail)) {
-        throw new Error("播放详情未返回可播放链接");
-      }
-    } catch (err) {
-      const message = err?.message || String(err);
-      errors.push({ accountId: account.id, label: account.label, error: message });
-      if (isCredentialFailureMessage(message)) {
-        await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(account.id)}`, {
-          method: "PATCH",
-          body: JSON.stringify({ status: "error", last_error: message })
-        }).catch(() => {});
-      } else {
-        await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(account.id)}`, {
-          method: "PATCH",
-          body: JSON.stringify({ last_error: message })
-        }).catch(() => {});
-      }
-      await audit(env, "movie.full_detail", { accountId: account.id, movieId, ok: false, message });
-      continue;
-    }
-
-    return await finishFullDetail(env, ctx, {
-      movieId,
-      action: "direct_full_detail",
-      account: verifiedAccount || account,
-      session: verified,
-      detail,
-      errors,
-      checkedAccountIds
-    });
-  }
-
-  if (lockedCandidates.length) {
-    const purchaseLock = await acquirePurchaseLock(env, movieId);
-    if (!purchaseLock.acquired) {
-      throw new HttpError("该视频正在由另一请求解锁，请稍后重试", 409, "PURCHASE_IN_PROGRESS");
-    }
-    try {
-      const buyCandidates = lowestCoinRandomOrder(lockedCandidates.map((item) => item.account))
-        .map((account) => lockedCandidates.find((item) => item.account.id === account.id))
-        .filter(Boolean);
-      for (const item of buyCandidates) {
-        let purchaseCompleted = false;
-        try {
-          await apiRequest("/movie/doBuy", { id: movieId }, item.session, env);
-          purchaseCompleted = true;
-          const detail = normalizeFullDetail(await apiRequest("/movie/detail", { id: movieId }, item.session, env));
-          if (isLockedCoinVideo(detail)) throw new Error("购买后仍显示未购买");
-          if (!playableDetailReady(detail)) throw new Error("购买后播放详情未返回可播放链接");
-          return await finishFullDetail(env, ctx, {
-            movieId,
-            action: "buy_then_full_detail",
-            account: item.account,
-            session: item.session,
-            detail,
-            errors,
-            checkedAccountIds,
-            purchaseMeta: {
-              purchasePolicy: "all_accounts_checked_then_lowest_coin",
-              purchasedByCoin: accountCoinValue(item.account, null),
-              lockedAccounts: lockedCandidates.length
-            }
-          });
-        } catch (err) {
-          const message = err?.message || String(err);
-          errors.push({ accountId: item.account.id, label: item.account.label, error: message, stage: "buy" });
-          if (isCredentialFailureMessage(message)) {
-            await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(item.account.id)}`, {
-              method: "PATCH",
-              body: JSON.stringify({ status: "error", last_error: message })
-            }).catch(() => {});
-          } else {
-            await supabase(env, `txzz_accounts?id=eq.${encodeURIComponent(item.account.id)}`, {
-              method: "PATCH",
-              body: JSON.stringify({ last_error: message })
-            }).catch(() => {});
-          }
-          await audit(env, "movie.full_detail.buy", { accountId: item.account.id, movieId, ok: false, message }).catch(() => {});
-          // 上游已确认扣款后不再尝试第二个账号，避免详情刷新异常造成重复消费。
-          if (purchaseCompleted) break;
-        }
-      }
-    } finally {
-      await releasePurchaseLock(env, movieId, purchaseLock.owner).catch(() => {});
-    }
-  }
-
-  await audit(env, "movie.full_detail.all_failed", {
-    movieId,
-    ok: false,
-    message: "所有云端账号均未能获取播放详情",
-    meta: { errors: errors.slice(-8) }
-  }).catch(() => {});
-  throw new HttpError("所有云端账号均未能获取播放详情，请检查账号状态后重试", 502, "ACCOUNT_ROTATION_FAILED");
-}
-
-async function finishFullDetail(env, ctx, options = {}) {
-  const { movieId, action, account, session, detail, errors = [], checkedAccountIds = new Set(), purchaseMeta = {} } = options;
-  const publicInfo = publicUserInfo(session?.userInfo || account?.user_info || account?.userInfo || null);
-  const summary = {
-    movieId,
-    action,
-    accountId: account.id,
-    accountLabel: account.label,
-    accountUser: account.username || accountName(publicInfo),
-    hasBuy: detail?.has_buy,
-    layerType: detail?.layer_type,
-    money: detail?.money,
-    oldMoney: detail?.old_money,
-    balance: detail?.balance,
-    playLink: detail?.play_link,
-    backupLink: detail?.backup_link,
-    fullStat: detail?.play_link ? { url: absoluteUrl(detail.play_link, env), pending: true } : null,
-    backupStat: detail?.backup_link ? { url: absoluteUrl(detail.backup_link, env), pending: true } : null,
-    fetchedAt: nowIso(),
-    remote: true,
-    rotation: {
-      accountId: account.id,
-      tried: checkedAccountIds.size || errors.length + 1,
-      failed: errors,
-      coinSort: true,
-      ...purchaseMeta
-    }
-  };
-  await cacheSet(env, account.id, movieId, detail, summary);
-  ctxWaitUntilStat(ctx, env, account.id, movieId, detail, summary);
-  await audit(env, "movie.full_detail", { accountId: account.id, movieId, ok: true, meta: { action, tried: summary.rotation.tried } });
-  return {
-    ok: true,
-    detail,
-    data: detail,
-    summary,
-    account: publicAccount({ ...account, status: "ok", user_info: publicInfo || account.user_info }),
-    state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id, fullDetails: [summary] }
-  };
-}
-
-function ctxWaitUntilStat(ctx, env, accountId, movieId, detail, summary) {
-  if (!ctx) return;
-  ctx.waitUntil((async () => {
-    const [fullStat, backupStat] = await Promise.all([
-      statM3u8Quick(detail?.play_link, env),
-      statM3u8Quick(detail?.backup_link, env)
-    ]);
-    const next = { ...summary, fullStat: fullStat || summary.fullStat, backupStat: backupStat || summary.backupStat };
-    await cacheSet(env, accountId, movieId, detail, next);
-  })().catch(() => {}));
-}
+const purchaseLedger = createPurchaseLedgerRepository({ supabase, nowIso });
+const playbackService = createPlaybackService({
+  HttpError,
+  absoluteUrl,
+  accountCoinValue,
+  accountName,
+  acquireAccountSession,
+  acquirePurchaseLock,
+  apiRequest,
+  audit,
+  cacheGet,
+  cacheSet,
+  isCredentialFailureMessage,
+  isUsableAccountRow,
+  ledger: purchaseLedger,
+  listAccountRows,
+  listAccounts,
+  lowestCoinRandomOrder,
+  markAccountFailure,
+  nowIso,
+  publicAccount,
+  releasePurchaseLock,
+  sortAccountsByCoin,
+  statM3u8Quick,
+  updateAccountAfterVerify
+});
 
 async function proxyMedia(request, env) {
   if (!isEnabled(env.TXZZ_PROXY_MEDIA, false)) return fail("媒体代理未启用", 404);
@@ -1027,19 +892,23 @@ async function detailedStatus(env) {
   const allConfigured = Object.values(envStatus).every(Boolean);
   let accountStats = null;
   let accountError = null;
+  const playbackSchema = allConfigured
+    ? await purchaseLedger.schemaReady(env)
+    : { ready: false, version: 0, error: "运行密钥不完整，尚未检查播放 schema" };
   try {
     accountStats = await accountPoolStats(env);
   } catch (err) {
     accountError = err?.message || String(err);
   }
-  const diagnostics = buildServiceDiagnostics({ envStatus, accountStats, accountError });
+  const diagnostics = buildServiceDiagnostics({ envStatus, accountStats, accountError, playbackSchema });
   return {
-    ok: allConfigured && !accountError && diagnostics.level !== "error",
+    ok: allConfigured && !accountError && playbackSchema.ready && diagnostics.level !== "error",
     service: "txzz-secure-pool",
     build: BUILD_TAG,
     env: envStatus,
     accounts: accountStats,
     accountError: accountError || undefined,
+    playbackSchema,
     diagnostics,
     time: nowIso()
   };
@@ -1050,14 +919,20 @@ async function handle(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
-  if (path === "/" || path === "/v1/health") {
+  if (path === "/" || path === "/v1/health" || path === "/v2/health") {
     if (request.method !== "GET") throw new HttpError("请求方法不受支持", 405, "METHOD_NOT_ALLOWED");
-    const ready = Object.values(envReady(env)).every(Boolean);
+    const envConfigured = Object.values(envReady(env)).every(Boolean);
+    const playbackSchema = path === "/v2/health" && envConfigured
+      ? await purchaseLedger.schemaReady(env)
+      : { ready: envConfigured, version: path === "/v2/health" ? 0 : 1 };
+    const ready = envConfigured && playbackSchema.ready;
     return json({
       ok: ready,
       service: "txzz-secure-pool",
       build: BUILD_TAG,
       ready,
+      apiVersion: path === "/v2/health" ? 2 : 1,
+      playbackSchema,
       authRequired: true,
       time: nowIso()
     }, ready ? 200 : 503);
@@ -1087,8 +962,19 @@ async function handle(request, env, ctx) {
   if (path === "/v1/accounts/stats" && request.method === "GET") {
     return json({ ok: true, stats: await accountPoolStats(env) });
   }
+  if (path === "/v2/playback/session" && request.method === "POST") {
+    return json(await playbackService.createSession(env, ctx, await readJsonBody(request)));
+  }
   if (path === "/v1/movie/full-detail" && request.method === "POST") {
-    return json(await fullDetail(env, ctx, await readJsonBody(request)));
+    return json(
+      await playbackService.createLegacyResponse(env, ctx, await readJsonBody(request)),
+      200,
+      {
+        Deprecation: "true",
+        Sunset: "Wed, 26 Aug 2026 00:00:00 GMT",
+        Link: '</v2/playback/session>; rel="successor-version"'
+      }
+    );
   }
   if (path === "/v1/media/proxy" && request.method === "GET") {
     return await proxyMedia(request, env);
@@ -1106,6 +992,7 @@ async function handle(request, env, ctx) {
     "/v1/accounts/seed",
     "/v1/accounts/verify",
     "/v1/accounts/stats",
+    "/v2/playback/session",
     "/v1/movie/full-detail",
     "/v1/media/proxy",
     "/v1/status",

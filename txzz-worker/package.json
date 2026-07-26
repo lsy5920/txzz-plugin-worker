@@ -1,13 +1,13 @@
 {
   "name": "txzz-secure-pool-worker",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node --test test/worker.test.js test/security.test.js",
-    "check": "node --check src/worker.js && node --check src/security.js && node --check src/domain/playback.js && node --check src/domain/diagnostics.js && npm test",
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/worker.js && node --check src/security.js && node --check src/domain/playback.js && node --check src/domain/diagnostics.js && node --check src/application/playback-service.js && node --check src/infrastructure/purchase-ledger.js && npm test",
     "check:worker": "wrangler deploy --dry-run --outdir .wrangler-check"
   },
   "devDependencies": {
