@@ -44,6 +44,28 @@ test("无扩展名签名 HLS 收到 206 后无 Range 重取完整清单", async 
     assert.equal(requests[1].headers.range, undefined);
     assert.equal(result.segments, 4);
     assert.equal(result.duration, 16);
+    assert.equal(result.protocol, "hls");
+    assert.equal(result.container, "mpeg-ts");
+    assert.equal(result.live, false);
+    assert.equal(result.audioMode, "muxed");
+    assert.deepEqual(result.variants, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("普通 HTML 200 响应不会被误判为 progressive 视频", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("<!doctype html><title>影片详情</title>", {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" }
+  });
+
+  try {
+    const result = await statM3u8Quick("https://target.example/movie/123", {}, 1_000);
+    assert.equal(result.ok, false);
+    assert.equal(result.protocol, "unknown");
+    assert.match(result.error, /不是可播放媒体/);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -21,7 +21,7 @@ function collectPlayableLinks(value, bucket = [], trail = []) {
   if (!value || bucket.length >= 64) return bucket;
   if (typeof value === "string") {
     const keyHint = trail.join(".").toLowerCase();
-    const explicitPlaybackField = /play|backup|m3u8|mp4|video|media|source|src|link|file/.test(keyHint);
+    const explicitPlaybackField = /play|backup|m3u8|mp4|video|media|source|src|file|lines?|streams?/.test(keyHint);
     const genericUrlField = /url/.test(keyHint);
     // 普通 url 字段仍要求明确的视频特征，避免把封面地址误判为播放线路。
     if ((explicitPlaybackField && hasReturnedPlayLink(value)) || (genericUrlField && looksPlayableLink(value))) {
@@ -82,7 +82,7 @@ function normalizeFullDetail(detail = null) {
     detail.videoUrl,
     detail.media_url,
     detail.mediaUrl,
-    detail.url,
+    looksPlayableLink(detail.url) ? detail.url : "",
     detail.src,
     detail.source,
     detail.file
@@ -118,10 +118,25 @@ function playableDetailReady(detail = null) {
   return Boolean(hasReturnedPlayLink(normalized?.play_link) || hasReturnedPlayLink(normalized?.backup_link));
 }
 
+/**
+ * 疑似播放字段只用于“禁止购买”，不能直接进入播放器。这样即使上游给出无扩展名
+ * 或暂时失效的权益链接，也不会因为探测失败而误触发金币购买。
+ */
+function hasPotentialPlaybackEntitlement(detail = null) {
+  if (!detail || typeof detail !== "object") return false;
+  const directKeys = [
+    "play_link", "playLink", "play_url", "playUrl", "m3u8", "m3u8_url", "m3u8Url",
+    "video_url", "videoUrl", "media_url", "mediaUrl", "backup_link", "backupLink",
+    "backup_url", "backupUrl", "second_play_link", "secondPlayLink", "url", "src", "source", "file"
+  ];
+  if (directKeys.some((key) => hasReturnedPlayLink(detail[key]))) return true;
+  return collectPlayableLinks(detail).length > 0;
+}
+
 function isLockedCoinVideo(detail = null) {
   const normalized = normalizeFullDetail(detail);
   // 有播放地址时，即使 has_buy 不是 y 也属于 VIP 可直看场景，严禁触发购买。
-  if (playableDetailReady(normalized)) return false;
+  if (playableDetailReady(normalized) || hasPotentialPlaybackEntitlement(detail)) return false;
   return normalized?.has_buy !== "y" && normalized?.layer_type === "money" && Number(normalized?.money || 0) > 0;
 }
 
@@ -196,19 +211,48 @@ function comparePlaybackSources(left, right) {
 
 function buildPlaybackSources(detail = {}, summary = {}, absoluteUrl = (value) => String(value || "")) {
   const normalized = normalizeFullDetail(detail) || {};
-  const rows = [
-    { id: "primary", label: "主线路", url: normalized.play_link || summary.playLink || "", stat: summary.fullStat },
-    { id: "backup", label: "备用线路", url: normalized.backup_link || summary.backupLink || "", stat: summary.backupStat }
+  const probedRows = Array.isArray(summary.probedSources) ? summary.probedSources.slice(0, 12) : [];
+  const rows = probedRows.length ? probedRows.map((row, index) => ({
+    id: row.id || (index === 0 ? "primary" : index === 1 ? "backup" : `alternate-${index + 1}`),
+    label: row.label || (index === 0 ? "推荐线路" : index === 1 ? "备用线路" : `候选线路 ${index + 1}`),
+    url: row.url,
+    stat: row.stat,
+    role: row.role || (index === 0 ? "primary" : index === 1 ? "backup" : "alternate")
+  })) : [
+    { id: "primary", label: "主线路", url: normalized.play_link || summary.playLink || "", stat: summary.fullStat, role: "primary" },
+    { id: "backup", label: "备用线路", url: normalized.backup_link || summary.backupLink || "", stat: summary.backupStat, role: "backup" }
   ];
   return rows
     .map((row) => ({
       id: row.id,
       label: row.label,
       url: absoluteUrl(row.url),
-      protocol: playbackProtocol(row.url),
-      health: sourceHealth(row.stat)
+      protocol: row.stat?.protocol || playbackProtocol(row.url),
+      role: row.role,
+      health: sourceHealth(row.stat),
+      media: {
+        durationSeconds: Number(row.stat?.duration || 0),
+        container: row.stat?.container || (playbackProtocol(row.url) === "progressive" ? "progressive" : "unknown"),
+        live: Boolean(row.stat?.live),
+        audioMode: row.stat?.audioMode || "unknown",
+        variants: Array.isArray(row.stat?.variants) ? row.stat.variants : []
+      }
     }))
     .filter((source) => hasReturnedPlayLink(source.url));
+}
+
+function playbackRevision(session) {
+  const value = JSON.stringify({
+    movieId: session.movieId,
+    recommended: session.decision?.recommendedSourceId,
+    sources: (session.sources || []).map((source) => [source.id, source.url, source.health?.duration])
+  });
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `playback-2.1-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 function recommendedPlaybackSource(sources = []) {
@@ -233,7 +277,7 @@ function createPlaybackSession(options = {}) {
     recommended && sources.some((source) => source.id !== recommended.id && isMeaningfullyLongerSource(recommended, source))
   );
   const fetchedAt = now.toISOString();
-  return {
+  const session = {
     id: sessionId,
     movieId: String(movieId || ""),
     title: String(movieTitle || summary.movieTitle || summary.title || `视频 ${movieId}`),
@@ -247,19 +291,24 @@ function createPlaybackSession(options = {}) {
           recommended.health.state === "healthy" ? "healthy-source" : "best-available-source"
         ]
         : ["no-playable-source"],
-      failoverAllowed: sources.length > 1
+      failoverAllowed: sources.length > 1,
+      policyVersion: "2.1"
     },
     account: { id: account.id, label: account.label },
     acquisition,
     fetchedAt,
     expiresAt: new Date(now.getTime() + 10 * 60 * 1000).toISOString()
   };
+  session.revision = playbackRevision(session);
+  return session;
 }
 
 function legacyResponseFromPlayback(result = {}) {
   const session = result.session || {};
-  const primary = session.sources?.find((source) => source.id === "primary") || null;
-  const backup = session.sources?.find((source) => source.id === "backup") || null;
+  const primary = session.sources?.find((source) => source.id === session.decision?.recommendedSourceId)
+    || session.sources?.[0]
+    || null;
+  const backup = session.sources?.find((source) => source.id !== primary?.id) || null;
   const summary = {
     movieId: session.movieId,
     movieTitle: session.title,
@@ -292,6 +341,7 @@ export {
   collectPlayableLinks,
   collectPlaybackCandidates,
   hasReturnedPlayLink,
+  hasPotentialPlaybackEntitlement,
   isLockedCoinVideo,
   looksPlayableLink,
   buildPlaybackSources,

@@ -20,6 +20,7 @@
 - Worker 健康检查接口
 - Worker 智能体检接口，可输出服务分数、分项检查和修复建议
 - v2 播放会话接口，统一返回线路健康度、推荐决策、账号摘要和资源获取过程
+- 金币购买安全对账接口，只允许原购买账号重新取详情且不调用购买
 - HLS 完整清单与嵌套线路探测，按每条视频自身的真实覆盖时长选择完整版本
 - 播放购买保护与服务诊断使用独立纯业务模块，路由编排不再重复承载判断细节
 - 插件侧体检结果记忆，设置页再次打开时可显示上次体检状态并支持清除历史记录
@@ -48,6 +49,7 @@ txzz-plugin-worker/
 │   │   ├── security.js             # 鉴权、请求校验和安全响应
 │   │   └── domain/                 # 播放购买保护与服务诊断纯业务规则
 │   ├── test/                        # Node.js 自动化测试
+│   ├── migrations/                  # Supabase v2/v3 非破坏性增量迁移
 │   ├── schema.sql                  # Supabase 表结构
 │   ├── package.json                # Node 项目配置和固定依赖
 │   ├── package-lock.json           # 依赖锁定文件
@@ -74,8 +76,8 @@ npm run check
 1. 打开 Supabase 控制台。
 2. 进入目标项目。
 3. 打开 SQL Editor。
-4. 复制 `txzz-worker/schema.sql` 全部内容。
-5. 粘贴并执行。
+4. 新项目复制 `txzz-worker/schema.sql` 全部内容并执行。
+5. 已有 v2 项目执行 `txzz-worker/migrations/2026-07-27-playback-v3.sql`；不要删除旧账本或缓存。
 
 ### 第三步：配置 Cloudflare 密钥
 
@@ -109,6 +111,7 @@ https://<你的服务名>.<你的账号>.workers.dev/v1/health
 ```text
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
+SUPABASE_DB_URL
 SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 TXZZ_API_AES_KEY
@@ -117,7 +120,7 @@ TXZZ_ACCESS_TOKEN
 TXZZ_SEED_ACCOUNTS_JSON
 ```
 
-其中 `TXZZ_ACCESS_TOKEN` 和 `TXZZ_SEED_ACCOUNTS_JSON` 为可选密钥，其余四项 Worker 运行密钥为必填项。自动部署固定使用 Ubuntu `24.04`、Node.js `22.16.0`、`actions/checkout@v4.2.2` 和 `actions/setup-node@v4.4.0`，避免环境漂移。
+其中 `TXZZ_ACCESS_TOKEN` 和 `TXZZ_SEED_ACCOUNTS_JSON` 为可选密钥；`SUPABASE_DB_URL` 只供 Actions 在部署前以事务执行 v3 迁移，其余四项为 Worker 运行密钥。自动部署固定使用 Ubuntu `24.04`、Node.js `22.16.0`、`actions/checkout@v4.2.2` 和 `actions/setup-node@v4.4.0`，避免环境漂移。
 
 建议部署流程：
 
@@ -182,7 +185,7 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/health
 1. 确认 Cloudflare Worker Secrets 中已经设置四个必填运行密钥：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`TXZZ_API_AES_KEY`、`TXZZ_CREDENTIAL_KEY`。
 2. 如果使用 GitHub Actions，确认 GitHub Secrets 中也有以上四项同名密钥；`TXZZ_ACCESS_TOKEN` 和 `TXZZ_SEED_ACCOUNTS_JSON` 均为可选项。
 3. 重新运行部署流程。
-4. 访问 `/v1/health` 查看 `ready` 是否为 `true`，再在插件中执行完整体检。
+4. 访问 `/v2/health`，确认 `ready: true` 且 `playbackSchema.version: 3`，再在插件中执行完整体检。
 
 ### 插件无法同步云端账号池
 
@@ -202,10 +205,10 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/health
 
 ### 金币视频被重复购买或 VIP 账号仍触发购买
 
-1. 确认已执行最新版 `schema.sql`，其中包含 `txzz_purchase_locks` 表和互斥函数。
-2. 确认 Worker 版本为 `2.0.2` 或更高版本。
-3. 新版会优先检查主线路和备用线路，只要已经拿到可播放地址就直接返回，VIP 账号不会再因 `has_buy` 标记误触发购买。
-4. 确实没有播放地址时才会进入购买流程，并使用五态购买幂等账本和数据库锁阻止并发或扣费后的重复购买。
+1. 确认已执行 `migrations/2026-07-27-playback-v3.sql`，`txzz_playback_schema_status()` 返回 `ready: true`、`version: 3`。
+2. 确认 Worker 版本为 `2.1.0` 或更高版本。
+3. 新版把疑似权益字段与已探测确认媒体分开；普通 HTML URL 不会进入播放器，但仍会阻止改用其他账号扣费。
+4. 确实没有播放地址时才会进入购买流程，并使用 `txzz_purchase_attempts`、数据库 RPC 和互斥锁阻止并发或扣费后的重复购买；陈旧 `pending` 只会转为 `uncertain`。
 
 ## 安全与隐私
 
@@ -221,12 +224,20 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/health
 
 | 组件 | 版本 |
 | --- | --- |
-| Worker | `2.0.2` |
-| 构建标识 | `txzz-worker-20260727-1015` |
+| Worker | `2.1.0` |
+| 构建标识 | `txzz-worker-20260727-1925` |
 | Wrangler | `4.110.0` |
 | Node.js | `22.16.0` 及以上 |
 
 ## 更新日志
+
+[2026-07-27 19:25] 【重构】升级 Worker 到 `2.1.0`（构建 `txzz-worker-20260727-1925`）：v2 会话增加 revision、线路 role/media 与策略版本；最多返回 12 条探测确认线路，普通 HTML 200 不再误判为 progressive 视频，疑似权益仍保持免重复购买保护。
+
+[2026-07-27 19:25] 【安全】新增 `txzz_purchase_attempts`、数据库原子 begin/transition/expire RPC、90 秒 stale pending → uncertain、旧账本镜像触发器，以及 `GET /v2/purchases/reconciliation`、`POST /v2/purchases/reconcile` 原账号安全对账；35 项 Node.js 测试全部通过。
+
+[2026-07-27 19:25] 【部署】Actions 新增必填 `SUPABASE_DB_URL`，先以事务执行 v3 增量迁移并验证 schema，再运行 Wrangler dry-run 和部署；线上门禁要求目标构建、`ready: true` 与 schema v3 同时满足。
+
+[2026-07-27 22:25] 【部署】发布工作流在执行 v3 迁移前显式检查并按需安装 PostgreSQL 客户端，避免 GitHub `ubuntu-24.04` 镜像是否预装 `psql` 的差异导致迁移步骤无法启动。
 
 2026-06-09 19:27 【优化】优化 GitHub Actions 部署流程，新增必填 GitHub Secrets 存在性检查。
 2026-06-09 19:39 【修复】修复 GitHub Actions 读取不到环境密钥的问题，部署任务显式绑定指定环境。

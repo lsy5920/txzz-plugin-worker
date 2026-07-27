@@ -41,6 +41,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TXZZ_API_AES_KEY: ${{ secrets.TXZZ_API_AES_KEY }}
           TXZZ_CREDENTIAL_KEY: ${{ secrets.TXZZ_CREDENTIAL_KEY }}
@@ -50,6 +51,7 @@ jobs:
             "CLOUDFLARE_API_TOKEN",
             "CLOUDFLARE_ACCOUNT_ID",
             "SUPABASE_URL",
+            "SUPABASE_DB_URL",
             "SUPABASE_SERVICE_ROLE_KEY",
             "TXZZ_API_AES_KEY",
             "TXZZ_CREDENTIAL_KEY"
@@ -60,6 +62,31 @@ jobs:
           }
           console.log("GitHub 密钥完整性检查通过。");
           NODE
+
+      - name: 准备 PostgreSQL 迁移客户端
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+          psql --version
+
+      - name: 执行 Supabase 播放 schema v3 增量迁移
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          psql "$SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -f migrations/2026-07-27-playback-v3.sql
+          schema_status="$(psql "$SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -Atc "select concat(public.txzz_playback_schema_status()->>'ready', '|', public.txzz_playback_schema_status()->>'version')")"
+          if [ "$schema_status" != "true|3" ]; then
+            echo "播放 schema v3 验证失败：$schema_status" >&2
+            exit 1
+          fi
+          echo "Supabase 播放 schema v3 迁移与门禁验证通过。"
+
+      - name: 执行 Wrangler 发布前 dry-run
+        run: npm run check:worker
 
       - name: 使用运行密钥部署 Worker
         env:
@@ -72,7 +99,7 @@ jobs:
           TXZZ_ACCESS_TOKEN: ${{ secrets.TXZZ_ACCESS_TOKEN }}
           TXZZ_SEED_ACCOUNTS_JSON: ${{ secrets.TXZZ_SEED_ACCOUNTS_JSON }}
         run: |
-          set -o pipefail
+          set -euo pipefail
           node - <<'NODE'
           const fs = require("fs");
           const required = [
@@ -142,11 +169,17 @@ jobs:
                 });
                 const health = await response.json();
                 lastResult = JSON.stringify(health);
-                if (response.ok && health?.build === expectedBuild && health?.ready === true) {
+                if (
+                  response.ok
+                  && health?.build === expectedBuild
+                  && health?.ready === true
+                  && health?.playbackSchema?.ready === true
+                  && Number(health?.playbackSchema?.version || 0) === 3
+                ) {
                   console.log(`线上构建验证通过：${workerUrl} / ${expectedBuild}`);
                   fs.appendFileSync(
                     process.env.GITHUB_STEP_SUMMARY,
-                    `## 默认 Worker 地址\n\n${workerUrl}\n\n构建 \`${expectedBuild}\` 已上线，运行密钥与播放 schema v2 均已就绪。\n`
+                    `## 默认 Worker 地址\n\n${workerUrl}\n\n构建 \`${expectedBuild}\` 已上线，运行密钥与播放 schema v3 均已就绪。\n`
                   );
                   return;
                 }
@@ -157,7 +190,7 @@ jobs:
             }
 
             throw new Error(
-              `线上构建验证失败：期望 ${expectedBuild} 且 ready=true，最后响应为 ${lastResult}`
+              `线上构建验证失败：期望 ${expectedBuild}、ready=true 且 playback schema v3，最后响应为 ${lastResult}`
             );
           }
           main().catch((error) => {

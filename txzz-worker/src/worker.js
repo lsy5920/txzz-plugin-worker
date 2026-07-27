@@ -24,7 +24,7 @@ const JSON_HEADERS = {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BUILD_TAG = "txzz-worker-20260727-1015";
+const BUILD_TAG = "txzz-worker-20260727-1925";
 const REQUIRED_SECRET_KEYS = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -810,8 +810,49 @@ function hlsVariantUrls(text = "", baseUrl = "") {
   return [...new Set(variants)].slice(0, 4);
 }
 
+function hlsAttributeList(value = "") {
+  const attributes = {};
+  const expression = /([A-Z0-9-]+)=("[^"]*"|[^,]*)/gi;
+  for (const match of String(value).matchAll(expression)) {
+    attributes[match[1].toUpperCase()] = String(match[2] || "").replace(/^"|"$/g, "");
+  }
+  return attributes;
+}
+
+function hlsVariantMetadata(text = "", baseUrl = "") {
+  const lines = String(text).split(/\r?\n/).map((line) => line.trim());
+  const variants = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!lines[index].startsWith("#EXT-X-STREAM-INF")) continue;
+    const attributes = hlsAttributeList(lines[index].split(":").slice(1).join(":"));
+    const candidate = lines.slice(index + 1).find((line) => line && !line.startsWith("#"));
+    if (!candidate) continue;
+    try {
+      const [width, height] = String(attributes.RESOLUTION || "").split("x").map(Number);
+      variants.push({
+        url: new URL(candidate, baseUrl).href,
+        bandwidth: Number(attributes.BANDWIDTH || 0),
+        averageBandwidth: Number(attributes["AVERAGE-BANDWIDTH"] || 0),
+        width: Number.isFinite(width) ? width : 0,
+        height: Number.isFinite(height) ? height : 0,
+        codecs: attributes.CODECS || "",
+        audioGroup: attributes.AUDIO || ""
+      });
+    } catch (_) {}
+  }
+  return variants.slice(0, 12);
+}
+
+function hlsContainer(text = "", url = "") {
+  const value = `${text}\n${url}`.toLowerCase();
+  if (/#ext-x-map|\.(?:m4s|mp4)(?:[?#\s]|$)/i.test(value)) return "fmp4";
+  if (/\.ts(?:[?#\s]|$)/i.test(value)) return "mpeg-ts";
+  return "unknown";
+}
+
 function hlsProbeStat(url, status, responseOk, text, latencyMs) {
   const durations = hlsDurations(text);
+  const variants = hlsVariantMetadata(text, url);
   return {
     url,
     status,
@@ -819,6 +860,11 @@ function hlsProbeStat(url, status, responseOk, text, latencyMs) {
     latencyMs,
     segments: durations.length,
     duration: Number(durations.reduce((sum, item) => sum + item, 0).toFixed(3)),
+    protocol: "hls",
+    container: hlsContainer(text, url),
+    live: durations.length > 0 && !String(text).includes("#EXT-X-ENDLIST"),
+    audioMode: /#EXT-X-MEDIA:[^\n]*TYPE=AUDIO/i.test(String(text)) ? "separate" : "muxed",
+    variants,
     checkedAt: nowIso()
   };
 }
@@ -849,7 +895,7 @@ async function fetchPlaybackProbe(url, signal) {
     || (response.status !== 206 && contentLength > 8 * 1024 * 1024 && !urlLooksHls && !/mpegurl/.test(contentType));
   if (definitelyLargeBinary) {
     await response.body?.cancel().catch(() => {});
-    return { response, text: "" };
+    return { response, text: "", binaryBodySkipped: true };
   }
   let text = await response.text();
   const partialManifest = (response.status === 206 || response.headers.get("content-range"))
@@ -867,7 +913,7 @@ async function fetchPlaybackProbe(url, signal) {
     }
     text = await response.text();
   }
-  return { response, text };
+  return { response, text, binaryBodySkipped: false };
 }
 
 async function statM3u8Quick(link, env, timeoutMs = 10000) {
@@ -877,9 +923,31 @@ async function statM3u8Quick(link, env, timeoutMs = 10000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const { response, text } = await fetchPlaybackProbe(url, controller.signal);
+    const { response, text, binaryBodySkipped } = await fetchPlaybackProbe(url, controller.signal);
     const latencyMs = Date.now() - startedAt;
     if (!String(text).includes("#EXTM3U")) {
+      const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+      const progressiveByType = /^video\//.test(contentType) || /application\/(?:mp4|x-mp4|webm)/.test(contentType);
+      const progressiveByBinary = /application\/(?:octet-stream|binary)/.test(contentType)
+        && (binaryBodySkipped || response.status === 206 || /\.(?:mp4|webm|m4v)(?:[?#]|$)/i.test(url));
+      const progressiveByUrl = !contentType && /\.(?:mp4|webm|m4v)(?:[?#]|$)/i.test(url);
+      if (!response.ok || (!progressiveByType && !progressiveByBinary && !progressiveByUrl)) {
+        return {
+          url,
+          status: response.status,
+          ok: false,
+          error: `响应不是可播放媒体（${contentType || "unknown content-type"}）`,
+          latencyMs,
+          segments: 0,
+          duration: 0,
+          protocol: "unknown",
+          container: "unknown",
+          live: false,
+          audioMode: "unknown",
+          variants: [],
+          checkedAt: nowIso()
+        };
+      }
       return {
         url,
         status: response.status,
@@ -887,6 +955,11 @@ async function statM3u8Quick(link, env, timeoutMs = 10000) {
         latencyMs,
         segments: 0,
         duration: 0,
+        protocol: "progressive",
+        container: /webm/.test(contentType) || /\.webm(?:[?#]|$)/i.test(url) ? "webm" : "mp4",
+        live: false,
+        audioMode: "muxed",
+        variants: [],
         checkedAt: nowIso()
       };
     }
@@ -894,7 +967,8 @@ async function statM3u8Quick(link, env, timeoutMs = 10000) {
     if (direct.duration > 0) return direct;
 
     // 主清单本身没有 EXTINF；并行探测变体清单并取覆盖时长最长者。
-    const variants = hlsVariantUrls(text, url);
+    const variantMetadata = hlsVariantMetadata(text, url);
+    const variants = variantMetadata.map((variant) => variant.url);
     const rows = await Promise.allSettled(variants.map(async (variantUrl) => {
       const variant = await fetchPlaybackProbe(variantUrl, controller.signal);
       return hlsProbeStat(
@@ -909,7 +983,14 @@ async function statM3u8Quick(link, env, timeoutMs = 10000) {
       .filter((row) => row.status === "fulfilled")
       .map((row) => row.value)
       .sort((left, right) => right.duration - left.duration || right.segments - left.segments)[0];
-    return best ? { ...best, url, resolvedPlaylistUrl: best.url, masterPlaylist: true } : direct;
+    return best ? {
+      ...best,
+      url,
+      resolvedPlaylistUrl: best.url,
+      masterPlaylist: true,
+      variants: variantMetadata,
+      audioMode: /#EXT-X-MEDIA:[^\n]*TYPE=AUDIO/i.test(String(text)) ? "separate" : best.audioMode
+    } : direct;
   } catch (err) {
     return {
       url,
@@ -1066,6 +1147,12 @@ async function handle(request, env, ctx) {
   if (path === "/v2/playback/session" && request.method === "POST") {
     return json(await playbackService.createSession(env, ctx, await readJsonBody(request)));
   }
+  if (path === "/v2/purchases/reconciliation" && request.method === "GET") {
+    return json(await playbackService.listReconciliation(env));
+  }
+  if (path === "/v2/purchases/reconcile" && request.method === "POST") {
+    return json(await playbackService.reconcileAttempt(env, ctx, await readJsonBody(request)));
+  }
   if (path === "/v1/movie/full-detail" && request.method === "POST") {
     return json(
       await playbackService.createLegacyResponse(env, ctx, await readJsonBody(request)),
@@ -1094,6 +1181,8 @@ async function handle(request, env, ctx) {
     "/v1/accounts/verify",
     "/v1/accounts/stats",
     "/v2/playback/session",
+    "/v2/purchases/reconciliation",
+    "/v2/purchases/reconcile",
     "/v1/movie/full-detail",
     "/v1/media/proxy",
     "/v1/status",

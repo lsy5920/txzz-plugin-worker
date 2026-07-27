@@ -81,8 +81,8 @@ function buildServiceDiagnostics({
     addCheck("playback-schema", "播放安全迁移", "ok", `播放 schema v${playbackSchema.version || 2} 已就绪。`);
   } else {
     addCheck("playback-schema", "播放安全迁移", "error", playbackSchema.error || "购买账本或 schema 探针尚未就绪。");
-    addSuggestion("先执行 migrations/2026-07-27-playback-v2.sql；迁移完成前直链仍可播放，但自动购买会被禁用。");
-    addAction("migrate-playback-v2", "执行播放安全迁移", "high", "在 Supabase SQL Editor 执行播放 v2 增量迁移并重新检查 /v2/health。");
+    addSuggestion("先执行 migrations/2026-07-27-playback-v3.sql；迁移完成前直链仍可播放，但自动购买会被禁用。");
+    addAction("migrate-playback-v3", "执行播放安全迁移", "high", "执行播放 v3 增量迁移并重新检查 /v2/health 的 playbackSchema.version=3。");
   }
 
   const score = Math.max(0, checks.reduce((value, item) => {

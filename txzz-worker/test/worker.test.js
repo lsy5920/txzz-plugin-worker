@@ -111,6 +111,18 @@ test("插件携带内置密钥后可按服务地址直接调用业务接口", as
   assert.ok(data.requestId);
 });
 
+test("v2 购买对账端点已注册并对错误方法返回 405", async () => {
+  for (const path of ["/v2/purchases/reconciliation", "/v2/purchases/reconcile"]) {
+    const response = await worker.fetch(new Request(`https://worker.example${path}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${BUILT_IN_ACCESS_TOKEN}` }
+    }), completeEnv, {});
+    const data = await response.json();
+    assert.equal(response.status, 405);
+    assert.equal(data.code, "METHOD_NOT_ALLOWED");
+  }
+});
+
 test("非插件请求缺少内置密钥时会被拒绝", async () => {
   const response = await worker.fetch(new Request("https://worker.example/v1/accounts", { method: "PUT" }), completeEnv, {});
   const data = await response.json();

@@ -20,6 +20,8 @@
 
 - `/v2/health` 深度健康检查，除运行密钥外还验证播放安全迁移
 - `/v2/playback/session` 统一返回线路、决策、账号和获取摘要
+- `/v2/purchases/reconciliation` 返回脱敏待对账记录
+- `/v2/purchases/reconcile` 只用原购买账号复核详情，绝不调用 `doBuy`
 - `/v1/health` 旧健康检查兼容入口
 - `/v1/diagnostics` 智能体检，返回总分、分项检查和下一步处理建议
 - `/v1/status` 服务整体状态，包含环境变量检查结果、账号池统计和智能体检摘要
@@ -87,7 +89,7 @@ npm run check
 2. 进入目标项目。
 3. 打开 SQL Editor。
 4. 新项目复制 `schema.sql` 全部内容并执行。
-5. 已有项目执行 `migrations/2026-07-27-playback-v2.sql`；该迁移只增表、增列、增索引和 RPC，不删除旧缓存数据。
+5. 已有旧项目先确认 v2 已执行，再执行 `migrations/2026-07-27-playback-v3.sql`；两次迁移都只增表、增列、增索引、触发器和 RPC，不删除旧缓存或旧账本。
 
 主要数据表：
 
@@ -98,8 +100,9 @@ npm run check
 | `txzz_audit_logs` | 保存账号验证、详情获取和接口调用审计记录。 |
 | `txzz_purchase_locks` | 保存短时购买互斥锁，防止同一视频并发重复扣费。 |
 | `txzz_purchase_ledger` | 保存 `pending / charged / resolved / failed_before_charge / uncertain` 五态购买账本。 |
+| `txzz_purchase_attempts` | v3 请求级幂等账本，以 `attempt_id` 为主键并限制 `(request_id, movie_id, account_id)` 唯一。 |
 
-`txzz_full_detail_cache` 在 v2 中增加 `schema_version` 与 `expires_at`。如果新表或 RPC 缺失，Worker 仍允许已有直链播放，但会禁用购买，并让 `/v2/health`、诊断和部署门禁明确返回未就绪。
+`txzz_full_detail_cache` 保留 `schema_version` 与 `expires_at`。v3 增加原子购买开始、合法状态迁移和 stale pending 过期 RPC，并在部署切换窗口把旧账本写入镜像到新表。如果 v3 表、约束、触发器或 RPC 缺失，Worker 仍允许已有直链播放，但会禁用购买，并让 `/v2/health`、诊断和部署门禁明确返回未就绪。
 
 ## 环境变量
 
@@ -214,6 +217,7 @@ https://<你的服务名>.<你的账号>.workers.dev/v1/health
 ```text
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
+SUPABASE_DB_URL
 SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 TXZZ_API_AES_KEY
@@ -227,7 +231,7 @@ TXZZ_ACCESS_TOKEN
 TXZZ_SEED_ACCOUNTS_JSON
 ```
 
-前六项为 GitHub Actions 与 Worker 运行所需配置；`TXZZ_ACCESS_TOKEN` 仅为运维脚本提供第二份有效密钥，`TXZZ_SEED_ACCOUNTS_JSON` 仅用于种子账号。自动部署固定使用 Ubuntu `24.04`、Node.js `22.16.0`、`actions/checkout@v4.2.2` 和 `actions/setup-node@v4.4.0`，并通过 `npm ci` 严格按 `package-lock.json` 安装。
+`CLOUDFLARE_*`、`SUPABASE_DB_URL` 与四项 Worker 运行密钥为 Actions 必填；`SUPABASE_DB_URL` 仅用于部署前事务迁移，不注入 Worker。`TXZZ_ACCESS_TOKEN` 仅为运维脚本提供第二份有效密钥，`TXZZ_SEED_ACCOUNTS_JSON` 仅用于种子账号。自动部署固定使用 Ubuntu `24.04`、Node.js `22.16.0`、`actions/checkout@v4.2.2` 和 `actions/setup-node@v4.4.0`，并通过 `npm ci` 严格按 `package-lock.json` 安装。
 
 部署成功后，在 Actions Summary 中查看 Worker 地址。
 
@@ -243,7 +247,7 @@ Authorization: Bearer <插件内置密钥或可选运维附加密钥>
 
 ### `GET /v2/health`
 
-发布门禁使用的无鉴权深度健康检查。只有运行密钥齐全、Supabase 可访问且 `txzz_playback_schema_status()` 返回 schema v2 就绪时，`ready` 才为 `true`。响应包含当前 `build`、数据库摘要和播放 schema 状态，不返回密钥明文。
+发布门禁使用的无鉴权深度健康检查。只有运行密钥齐全、Supabase 可访问且 `txzz_playback_schema_status()` 返回 schema v3 就绪时，`ready` 才为 `true`。响应包含当前 `build`、数据库摘要和播放 schema 状态，不返回密钥明文。
 
 ### `POST /v2/playback/session`
 
@@ -272,6 +276,7 @@ Authorization: Bearer <插件内置密钥或可选运维附加密钥>
   "ok": true,
   "session": {
     "id": "playback-12345-uuid",
+    "revision": "playback-2.1-ab12cd34",
     "movieId": "12345",
     "title": "示例影片",
     "phase": "ready",
@@ -281,15 +286,24 @@ Authorization: Bearer <插件内置密钥或可选运维附加密钥>
         "label": "主线路",
         "url": "https://media.example/video.m3u8",
         "protocol": "hls",
-        "health": { "state": "healthy" }
+        "role": "primary",
+        "health": { "state": "healthy" },
+        "media": {
+          "durationSeconds": 3600,
+          "container": "mpeg-ts",
+          "live": false,
+          "audioMode": "muxed",
+          "variants": []
+        }
       }
     ],
     "decision": {
       "recommendedSourceId": "primary",
-      "reason": "主线路健康且评分最高"
+      "reasonCodes": ["healthy-source"],
+      "policyVersion": "2.1"
     },
     "account": { "id": "account-id", "label": "账号摘要" },
-    "acquisition": { "kind": "direct", "attempts": [] },
+    "acquisition": { "mode": "direct", "attempts": 1, "failed": [] },
     "fetchedAt": "2026-07-27T01:00:00.000Z",
     "expiresAt": "2026-07-27T01:10:00.000Z"
   }
@@ -300,11 +314,19 @@ Authorization: Bearer <插件内置密钥或可选运维附加密钥>
 
 购买规则：
 
-1. 优先使用 schema v2 有效缓存。
+1. 优先使用 schema v3 有效缓存。
 2. 逐一检查全部可用账号，只要任意账号返回主线或备用线，立即禁止购买。
 3. 汇总仍锁定的账号，从最低金币账号组随机选择一个账号尝试一次。
 4. 购买成功先把账本写为 `charged`，再用原账号刷新详情。
 5. 刷新失败进入 `uncertain`；`charged` 或 `uncertain` 只能用原账号对账，禁止自动购买第二次。
+
+### `GET /v2/purchases/reconciliation`
+
+返回当前 `pending / charged / uncertain` 记录的脱敏列表，只包含 attempt/request/movie 标识、状态、价格、公开账号摘要、脱敏错误和时间；不返回凭据、完整详情或原始签名 URL。
+
+### `POST /v2/purchases/reconcile`
+
+请求 `{ "attemptId": "...", "reconciliationId": "..." }`。服务只找到原 `account_id`、重新建立该账号会话并读取详情，绝不调用 `doBuy`。确认媒体后转为 `resolved` 并返回播放会话；失败保持 `uncertain` 或原终态，并返回 `PURCHASE_RECONCILIATION_REQUIRED`。
 
 ### `GET /v1/health`
 
@@ -483,7 +505,7 @@ Invoke-RestMethod `
 ### `/v2/health` 返回 `ready: false`
 
 1. 确认本地 `.dev.vars` 或 Cloudflare Secrets 已配置四个必填变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`TXZZ_API_AES_KEY`、`TXZZ_CREDENTIAL_KEY`。
-2. 执行 `migrations/2026-07-27-playback-v2.sql`，确认 `txzz_playback_schema_status()` 返回 `ready: true` 和 `version: 2`。
+2. 执行 `migrations/2026-07-27-playback-v3.sql`，确认 `txzz_playback_schema_status()` 返回 `ready: true` 和 `version: 3`。
 3. 重新运行 `npm run dev` 或重新部署 Worker。
 3. 如果使用 GitHub Actions，确认 GitHub Secrets 没有漏填。
 
@@ -519,9 +541,9 @@ Invoke-RestMethod `
 
 ### VIP 已有播放链接仍发生金币购买
 
-1. 确认 Worker 已升级到 `1.4.0` 或更高版本。
-2. 重新执行最新版 `schema.sql`，确保购买锁表和函数存在。
-3. 新版把“是否已有可播放链接”放在金币锁定判断之前，主线路、备用线路、无扩展名签名地址或相对播放地址存在时都不会调用购买接口。
+1. 确认 Worker 已升级到 `2.1.0`，并在 `/v2/health` 中看到 schema v3 就绪。
+2. 已有项目执行 `migrations/2026-07-27-playback-v3.sql`，确认 attempts 表、唯一约束、镜像触发器和三个 RPC 均存在。
+3. 新版先区分疑似权益和探测确认媒体：确认线路直接播放；普通网页 URL 不进入 sources，但也不会因此触发购买。
 
 ## 安全与隐私
 
@@ -538,13 +560,21 @@ Invoke-RestMethod `
 
 | 组件 | 版本 |
 | --- | --- |
-| Worker | `2.0.2` |
-| 构建标识 | `txzz-worker-20260727-1015` |
+| Worker | `2.1.0` |
+| 构建标识 | `txzz-worker-20260727-1925` |
 | Wrangler | `4.110.0` |
 | Node.js | `22.16.0` 及以上 |
 | 数据库 | Supabase |
 
 ## 更新日志
+
+[2026-07-27 19:25] 【重构】升级 Worker 到 `2.1.0`（构建 `txzz-worker-20260727-1925`）：播放会话新增 revision、source role/media 与 policyVersion，最多返回 12 条确认线路；普通 HTML 200 响应不再被误判为 progressive 视频，v1 仍把推荐/次优线路映射为主备字段。
+
+[2026-07-27 19:25] 【安全】Supabase schema 升级到 v3：新增请求级幂等 attempts 表、五态单向 RPC、90 秒 stale pending → uncertain、旧账本镜像触发器和原账号对账 API。扣费后必须先探测确认媒体再写 `resolved`，35 项 Node.js 测试全部通过。
+
+[2026-07-27 19:25] 【部署】GitHub Actions 要求 `SUPABASE_DB_URL`，在 Wrangler dry-run 和部署前以事务执行 v3 增量迁移；发布后同时核对构建、`ready: true` 与 schema v3。
+
+[2026-07-27 22:25] 【部署】Actions 在 v3 迁移前显式校验并按需安装 `postgresql-client`，随后输出 `psql --version`，不再依赖 GitHub Runner 的隐式预装状态。
 
 [2026-07-27 10:15] 【修复】升级 Worker 到 `2.0.2`（构建 `txzz-worker-20260727-1015`）：已识别的 HLS 清单不再使用 Range 探测，无扩展名签名地址若返回 206 也会在识别 `#EXTM3U` 后无 Range 重取；播放详情递归收集 `lines[]` 等嵌套候选并按实际清单时长保留主备线路，避免短试看清单覆盖不同视频的完整版本。自动化测试增至 23 项，并直接覆盖无扩展名 HLS 的 206 截断回归。
 

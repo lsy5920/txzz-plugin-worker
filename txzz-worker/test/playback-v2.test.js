@@ -11,11 +11,12 @@ function account(id, coin) {
 
 function createHarness(options = {}) {
   const accounts = options.accounts || [account("a", 10)];
-  const calls = { api: [], transitions: [], buys: [], blockingChecks: 0 };
+  const calls = { api: [], transitions: [], buys: [], blockingChecks: 0, audits: [] };
   const detailByAccount = options.detailByAccount || {};
   const sessions = new Map(accounts.map((item) => [item.id, { accountId: item.id, deviceId: item.id, userToken: "token" }]));
   const ledger = {
-    schemaReady: async () => ({ ready: true, version: 2 }),
+    schemaReady: async () => options.schemaStatus || ({ ready: true, version: 3 }),
+    expireStale: async () => Number(options.expiredStale || 0),
     findBlocking: async () => {
       const index = calls.blockingChecks;
       calls.blockingChecks += 1;
@@ -27,12 +28,14 @@ function createHarness(options = {}) {
     begin: async (_env, row) => {
       if (options.beginError) throw options.beginError;
       calls.transitions.push({ ...row, status: "pending" });
-      return row;
+      return options.beginResult || { ...row, action: "created", attempt_id: "attempt-1", status: "pending" };
     },
     transition: async (_env, row) => {
       calls.transitions.push(row);
       return row;
-    }
+    },
+    findAttempt: async () => options.reconciliationAttempt || null,
+    listReconciliation: async () => options.reconciliationRows || []
   };
   let detailCount = 0;
   const apiRequest = async (endpoint, _payload, session) => {
@@ -57,7 +60,7 @@ function createHarness(options = {}) {
     acquireAccountSession: async (item) => sessions.get(item.id),
     acquirePurchaseLock: async () => options.lock || { acquired: true, owner: "owner" },
     apiRequest,
-    audit: async () => {},
+    audit: async (...args) => { calls.audits.push(args); },
     cacheGet: async () => options.cache || null,
     cacheSet: async () => true,
     isCredentialFailureMessage: () => false,
@@ -68,12 +71,17 @@ function createHarness(options = {}) {
     lowestCoinRandomOrder: (items) => [...items].sort((left, right) => left.user_info.coin - right.user_info.coin),
     markAccountFailure: async () => {},
     nowIso: () => "2026-07-27T00:00:00.000Z",
-    publicAccount: (item) => ({ id: item.id, label: item.label }),
+    publicAccount: (item) => ({ id: item.id, label: item.label, coin: item.user_info?.coin }),
     releasePurchaseLock: async () => {},
     sortAccountsByCoin: (items) => [...items].sort((left, right) => left.user_info.coin - right.user_info.coin),
     statM3u8Quick: async (link) => {
-      if (typeof options.probeByUrl === "function") return options.probeByUrl(link);
-      return { ok: true, status: 200, segments: 8, duration: 48 };
+      const stat = typeof options.probeByUrl === "function"
+        ? await options.probeByUrl(link)
+        : { ok: true, status: 200, segments: 8, duration: 48 };
+      return {
+        protocol: String(link).includes("m3u8") ? "hls" : "progressive",
+        ...stat
+      };
     },
     updateAccountAfterVerify: async (_env, item) => item
   };
@@ -103,10 +111,10 @@ test("lines candidate duration selection", async () => {
         : { ok: true, status: 200, segments: 120, duration: 720 }
   });
   const result = await service.createSession({}, {}, { movieId: "lines-1", requestId: "req-lines-1" });
-  assert.equal(result.session.sources.find((source) => source.id === "backup").health.duration, 3_480);
-  assert.equal(result.session.decision.recommendedSourceId, "backup");
-  assert.match(result.detail.play_link, /preview-12m/);
-  assert.match(result.detail.backup_link, /full-58m/);
+  const recommended = result.session.sources.find((source) => source.id === result.session.decision.recommendedSourceId);
+  assert.equal(recommended.health.duration, 3_480);
+  assert.match(result.detail.play_link, /full-58m/);
+  assert.match(result.detail.backup_link, /full-42m/);
   assert.doesNotMatch(result.detail.backup_link, /preview-15m/);
 });
 
@@ -243,4 +251,119 @@ test("v2 必须携带 requestId", async () => {
     service.createSession({}, {}, { movieId: "6" }),
     (error) => error.code === "REQUEST_ID_REQUIRED"
   );
+});
+
+test("普通网页 URL 不是媒体源，但疑似权益存在时禁止切换账号购买", async () => {
+  const { service, calls } = createHarness({
+    accounts: [account("html", 5), account("locked", 10)],
+    detailByAccount: {
+      html: { has_buy: "y", url: "https://target.example/movie/123" },
+      locked: locked()
+    }
+  });
+  await assert.rejects(
+    service.createSession({}, {}, { movieId: "html-url", requestId: "req-html-url" }),
+    (error) => error.code === "PLAYBACK_UNAVAILABLE"
+  );
+  assert.deepEqual(calls.buys, []);
+});
+
+test("显式 play_url 返回 HTML 时不进入 sources 且仍禁止购买", async () => {
+  const { service, calls } = createHarness({
+    accounts: [account("html", 5), account("locked", 10)],
+    detailByAccount: {
+      html: { has_buy: "y", play_url: "https://target.example/movie/123" },
+      locked: locked()
+    },
+    probeByUrl: async () => ({
+      ok: false,
+      status: 200,
+      protocol: "unknown",
+      error: "响应不是可播放媒体（text/html）"
+    })
+  });
+  await assert.rejects(
+    service.createSession({}, {}, { movieId: "html-play-url", requestId: "req-html-play-url" }),
+    (error) => error.code === "PLAYBACK_UNAVAILABLE"
+  );
+  assert.deepEqual(calls.buys, []);
+});
+
+test("幂等 begin 返回 pending 时保留 PURCHASE_IN_PROGRESS 而不是误报账本不可用", async () => {
+  const { service, calls } = createHarness({
+    detailByAccount: { a: locked() },
+    beginResult: {
+      action: "idempotent",
+      attempt_id: "attempt-existing",
+      movie_id: "idem",
+      account_id: "a",
+      status: "pending"
+    }
+  });
+  await assert.rejects(
+    service.createSession({}, {}, { movieId: "idem", requestId: "req-idem" }),
+    (error) => error.code === "PURCHASE_IN_PROGRESS" && error.status === 409
+  );
+  assert.deepEqual(calls.buys, []);
+});
+
+test("购买安全账本未达到 schema v3 时禁止扣费", async () => {
+  const { service, calls } = createHarness({
+    detailByAccount: { a: locked() },
+    schemaStatus: { ready: false, version: 2 }
+  });
+  await assert.rejects(
+    service.createSession({}, {}, { movieId: "schema-v2", requestId: "req-schema-v2" }),
+    (error) => error.code === "PURCHASE_LEDGER_UNAVAILABLE"
+  );
+  assert.deepEqual(calls.buys, []);
+});
+
+test("安全对账只使用原账号重新取详情且绝不调用 doBuy", async () => {
+  const attempt = {
+    attempt_id: "attempt-reconcile",
+    request_id: "request-reconcile",
+    movie_id: "movie-reconcile",
+    account_id: "original",
+    status: "uncertain",
+    price: 20
+  };
+  const { service, calls } = createHarness({
+    accounts: [account("original", 8), account("other", 5)],
+    reconciliationAttempt: attempt,
+    detailByAccount: {
+      original: { has_buy: "y", play_link: "/reconciled.m3u8" },
+      other: locked()
+    }
+  });
+  const result = await service.reconcileAttempt({}, {}, {
+    attemptId: attempt.attempt_id,
+    reconciliationId: "ui-action-1"
+  });
+  assert.equal(result.session.account.id, "original");
+  assert.deepEqual(calls.buys, []);
+  assert.ok(calls.transitions.some((row) => row.status === "resolved" && row.attemptId === attempt.attempt_id));
+});
+
+test("对账列表只返回脱敏错误和公开账号摘要", async () => {
+  const { service } = createHarness({
+    reconciliationRows: [{
+      attempt_id: "attempt-list",
+      request_id: "request-list",
+      movie_id: "movie-list",
+      account_id: "a",
+      status: "uncertain",
+      price: 18,
+      error: "token=secret https://cdn.example/video.m3u8?signature=raw",
+      created_at: "2026-07-27T00:00:00.000Z",
+      updated_at: "2026-07-27T00:01:00.000Z",
+      detail: { play_link: "https://must-not-leak.example/video.m3u8" }
+    }]
+  });
+  const result = await service.listReconciliation({});
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].error.includes("secret"), false);
+  assert.equal(result.items[0].error.includes("cdn.example"), false);
+  assert.deepEqual(Object.keys(result.items[0].account).sort(), ["coin", "id", "label"]);
+  assert.equal("detail" in result.items[0], false);
 });
