@@ -1,6 +1,7 @@
 "use strict";
 
 import {
+  collectPlaybackCandidates,
   createPlaybackSession,
   legacyResponseFromPlayback,
   normalizeFullDetail,
@@ -62,28 +63,54 @@ function createPlaybackService(deps) {
     const { movieId, movieTitle, account, detail, mode, errors, attempts, purchase } = options;
     // 返回会话前并行探测主备清单。若先按“主线优先”返回，短预览线会在后台
     // 探测完成前被播放器锁定，正是 Vlog 17 分钟覆盖 1 小时完整版的根因。
-    const [primaryStat, backupStat] = await Promise.all([
-      statM3u8Quick(detail?.play_link, env),
-      statM3u8Quick(detail?.backup_link, env)
-    ]);
+    const candidates = collectPlaybackCandidates(detail, options.summary || {})
+      .map((candidate) => ({ ...candidate, url: absoluteUrl(candidate.url, env) }))
+      .filter((candidate) => candidate.url)
+      .slice(0, 12);
+    const probed = await Promise.all(candidates.map(async (candidate) => ({
+      ...candidate,
+      stat: await statM3u8Quick(candidate.url, env)
+    })));
+    const ranked = [...probed].sort((left, right) => {
+      const leftDuration = Number(left.stat?.duration || 0);
+      const rightDuration = Number(right.stat?.duration || 0);
+      if (leftDuration > 0 && rightDuration > 0 && leftDuration !== rightDuration) {
+        const difference = Math.abs(leftDuration - rightDuration);
+        if (difference >= Math.max(90, Math.min(leftDuration, rightDuration) * 0.08)) return rightDuration - leftDuration;
+      }
+      return (Number(right.stat?.score || 0) + Number(right.priority || 0))
+        - (Number(left.stat?.score || 0) + Number(left.priority || 0));
+    });
+    const explicitPrimaryUrl = absoluteUrl(detail?.play_link || options.summary?.playLink || "", env);
+    const primary = ranked.find((candidate) => candidate.url === explicitPrimaryUrl) || ranked[0] || null;
+    // backup 字段不天然代表完整版；真实接口可能把第二条试看线放在这里，
+    // 完整线路则藏在 lines[]。备用位因此取探测后排名最高的不同 URL。
+    const backup = ranked.find((candidate) => candidate.url !== primary?.url) || null;
+    const resolvedDetail = {
+      ...detail,
+      play_link: primary?.url || detail?.play_link || "",
+      backup_link: backup?.url || detail?.backup_link || ""
+    };
+    const primaryStat = primary?.stat || null;
+    const backupStat = backup?.stat || null;
     const probedSummary = {
       movieId,
       movieTitle,
-      playLink: detail?.play_link,
-      backupLink: detail?.backup_link,
+      playLink: resolvedDetail.play_link,
+      backupLink: resolvedDetail.backup_link,
       fullStat: primaryStat,
       backupStat
     };
     const session = createPlaybackSession({
       movieId,
       movieTitle,
-      detail,
+      detail: resolvedDetail,
       summary: probedSummary,
       account,
       acquisition: acquisition(mode, attempts, errors, purchase),
       absoluteUrl: (value) => absoluteUrl(value, env)
     });
-    await cacheSet(env, account.id, movieId, detail, { schemaVersion: 2, session });
+    await cacheSet(env, account.id, movieId, resolvedDetail, { schemaVersion: 3, session });
     await audit(env, "playback.session.ready", {
       accountId: account.id,
       movieId,
@@ -102,7 +129,7 @@ function createPlaybackService(deps) {
     return {
       ok: true,
       session,
-      detail,
+      detail: resolvedDetail,
       account: publicAccount(account),
       state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id }
     };

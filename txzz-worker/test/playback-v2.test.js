@@ -82,6 +82,34 @@ function createHarness(options = {}) {
 
 const locked = (price = 20) => ({ has_buy: "n", layer_type: "money", money: price, play_link: "" });
 
+test("lines candidate duration selection", async () => {
+  const { service } = createHarness({
+    detailByAccount: {
+      a: {
+        has_buy: "y",
+        play_link: "/preview-12m.m3u8",
+        backup_link: "/preview-15m.m3u8",
+        lines: [
+          { id: "1", name: "preview", link: "/preview-12m.m3u8" },
+          { id: "2", name: "full", link: "/full-42m.m3u8" },
+          { id: "3", name: "backup", link: "/full-58m.m3u8" }
+        ]
+      }
+    },
+    probeByUrl: async (link) => String(link).includes("58m")
+      ? { ok: true, status: 200, segments: 580, duration: 3_480 }
+      : String(link).includes("42m")
+        ? { ok: true, status: 200, segments: 420, duration: 2_520 }
+        : { ok: true, status: 200, segments: 120, duration: 720 }
+  });
+  const result = await service.createSession({}, {}, { movieId: "lines-1", requestId: "req-lines-1" });
+  assert.equal(result.session.sources.find((source) => source.id === "backup").health.duration, 3_480);
+  assert.equal(result.session.decision.recommendedSourceId, "backup");
+  assert.match(result.detail.play_link, /preview-12m/);
+  assert.match(result.detail.backup_link, /full-58m/);
+  assert.doesNotMatch(result.detail.backup_link, /preview-15m/);
+});
+
 test("v2 会话返回完整线路契约并以健康主线路为推荐", () => {
   const session = createPlaybackSession({
     movieId: "88",

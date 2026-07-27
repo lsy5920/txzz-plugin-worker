@@ -24,7 +24,7 @@ const JSON_HEADERS = {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BUILD_TAG = "txzz-worker-20260727-0851";
+const BUILD_TAG = "txzz-worker-20260727-1015";
 const REQUIRED_SECRET_KEYS = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -824,34 +824,53 @@ function hlsProbeStat(url, status, responseOk, text, latencyMs) {
 }
 
 async function fetchPlaybackProbe(url, signal) {
+  const urlLooksHls = /m3u8|mpegurl/i.test(String(url || ""));
   const headers = {
     accept: "application/vnd.apple.mpegurl, application/x-mpegURL, text/plain, */*;q=0.1",
     // 无扩展名地址可能实际是 MP4；限制读取量，避免探测时下载整个视频。
-    range: "bytes=0-524287"
+    ...(urlLooksHls ? {} : { range: "bytes=0-524287" })
   };
   let response = await fetch(url, {
     signal,
     headers
   });
   // 少数 HLS 网关拒绝 Range；已知清单地址安全回退为普通小文本请求。
-  if (!response.ok && /m3u8|mpegurl/i.test(url)) {
+  if (!response.ok && urlLooksHls) {
     await response.body?.cancel().catch(() => {});
     response = await fetch(url, { signal, headers: { accept: headers.accept } });
   }
-  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-  const contentLength = Number(response.headers.get("content-length") || 0);
-  const urlLooksHls = /m3u8|mpegurl/i.test(url);
+  if (urlLooksHls && (response.status === 206 || response.headers.get("content-range"))) {
+    await response.body?.cancel().catch(() => {});
+    response = await fetch(url, { signal, headers: { accept: headers.accept } });
+  }
+  let contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  let contentLength = Number(response.headers.get("content-length") || 0);
   const definitelyLargeBinary = /video\/(?:mp4|webm|quicktime)|application\/mp4/.test(contentType)
-    || (response.status !== 206 && contentLength > 2 * 1024 * 1024 && !urlLooksHls);
+    || (response.status !== 206 && contentLength > 8 * 1024 * 1024 && !urlLooksHls && !/mpegurl/.test(contentType));
   if (definitelyLargeBinary) {
     await response.body?.cancel().catch(() => {});
     return { response, text: "" };
   }
-  const text = await response.text();
+  let text = await response.text();
+  const partialManifest = (response.status === 206 || response.headers.get("content-range"))
+    && (/mpegurl/.test(contentType) || String(text).includes("#EXTM3U"));
+  if (partialManifest) {
+    // 无扩展名的签名地址只能在响应后确认是 HLS。确认后必须去掉 Range
+    // 重取完整文本，否则大于 512 KiB 的 Vlog 会被稳定截成错误时长。
+    response = await fetch(url, { signal, headers: { accept: headers.accept } });
+    contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    contentLength = Number(response.headers.get("content-length") || 0);
+    // 已由首段正文确认是 #EXTM3U；CDN 即使错报 octet-stream，也必须读取完整清单。
+    if (/video\/(?:mp4|webm|quicktime)|application\/mp4/.test(contentType)) {
+      await response.body?.cancel().catch(() => {});
+      return { response, text: "" };
+    }
+    text = await response.text();
+  }
   return { response, text };
 }
 
-async function statM3u8Quick(link, env, timeoutMs = 4500) {
+async function statM3u8Quick(link, env, timeoutMs = 10000) {
   if (!link) return null;
   const url = absoluteUrl(link, env);
   const startedAt = Date.now();
@@ -1112,5 +1131,6 @@ export {
   isLockedCoinVideo,
   normalizeAccount,
   shortStableHash,
+  statM3u8Quick,
   slug
 };

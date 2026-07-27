@@ -16,7 +16,9 @@ function hasReturnedPlayLink(value) {
 }
 
 function collectPlayableLinks(value, bucket = [], trail = []) {
-  if (!value || bucket.length >= 16) return bucket;
+  // 完整线路常在详情末尾的 lines/sourceList 中。限制过小会先被封面或推荐媒体
+  // 占满，64 条既能覆盖真实响应，也能约束异常深层对象的扫描成本。
+  if (!value || bucket.length >= 64) return bucket;
   if (typeof value === "string") {
     const keyHint = trail.join(".").toLowerCase();
     const explicitPlaybackField = /play|backup|m3u8|mp4|video|media|source|src|link|file/.test(keyHint);
@@ -28,16 +30,41 @@ function collectPlayableLinks(value, bucket = [], trail = []) {
     return bucket;
   }
   if (Array.isArray(value)) {
-    value.slice(0, 20).forEach((item, index) => collectPlayableLinks(item, bucket, [...trail, String(index)]));
+    value.slice(0, 48).forEach((item, index) => collectPlayableLinks(item, bucket, [...trail, String(index)]));
     return bucket;
   }
   if (typeof value === "object") {
     for (const [key, item] of Object.entries(value)) {
-      if (bucket.length >= 16) break;
+      if (bucket.length >= 64) break;
       collectPlayableLinks(item, bucket, [...trail, key]);
     }
   }
   return bucket;
+}
+
+function playbackCandidatePriority(key = "") {
+  const hint = String(key || "").toLowerCase();
+  let score = 0;
+  if (/play[_-]?link|playurl|main|primary/.test(hint)) score += 120;
+  if (/backup|second|spare|mirror|line/.test(hint)) score += 90;
+  if (/m3u8|mp4|video|media|source|src|link|file/.test(hint)) score += 40;
+  // 试看地址仍可播放，但不能压过同一详情中的完整线路。
+  if (/preview|trailer|sample|clip|trial|试看|片段/.test(hint)) score -= 180;
+  return score;
+}
+
+function collectPlaybackCandidates(detail = {}, summary = {}) {
+  const rows = collectPlayableLinks({ ...detail, summary });
+  const seen = new Set();
+  return rows
+    .map((row) => ({ ...row, priority: playbackCandidatePriority(row.key) }))
+    .filter((row) => {
+      const url = String(row.url || "").trim();
+      if (!hasReturnedPlayLink(url) || seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    })
+    .sort((left, right) => right.priority - left.priority);
 }
 
 function normalizeFullDetail(detail = null) {
@@ -263,6 +290,7 @@ function legacyResponseFromPlayback(result = {}) {
 
 export {
   collectPlayableLinks,
+  collectPlaybackCandidates,
   hasReturnedPlayLink,
   isLockedCoinVideo,
   looksPlayableLink,
