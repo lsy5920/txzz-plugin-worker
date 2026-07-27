@@ -71,7 +71,10 @@ function createHarness(options = {}) {
     publicAccount: (item) => ({ id: item.id, label: item.label }),
     releasePurchaseLock: async () => {},
     sortAccountsByCoin: (items) => [...items].sort((left, right) => left.user_info.coin - right.user_info.coin),
-    statM3u8Quick: async () => ({ ok: true, status: 200, segments: 8 }),
+    statM3u8Quick: async (link) => {
+      if (typeof options.probeByUrl === "function") return options.probeByUrl(link);
+      return { ok: true, status: 200, segments: 8, duration: 48 };
+    },
     updateAccountAfterVerify: async (_env, item) => item
   };
   return { calls, service: createPlaybackService(deps) };
@@ -100,6 +103,37 @@ test("v2 会话返回完整线路契约并以健康主线路为推荐", () => {
   assert.equal(session.sources[1].protocol, "progressive");
   assert.equal(session.decision.recommendedSourceId, "primary");
   assert.ok(session.expiresAt > session.fetchedAt);
+});
+
+test("不同视频按主备清单相对时长选择完整版而不写死固定时长", async () => {
+  const cachedDetail = {
+    has_buy: "y",
+    play_link: "/preview-17m.m3u8",
+    backup_link: "/full-1h.m3u8"
+  };
+  const { service, calls } = createHarness({
+    cache: {
+      detail: cachedDetail,
+      summary: {
+        movieId: "vlog-1",
+        session: createPlaybackSession({
+          movieId: "vlog-1",
+          detail: cachedDetail,
+          account: account("a", 10),
+          absoluteUrl: (value) => new URL(value, "https://target.example").href
+        })
+      }
+    },
+    probeByUrl: async (link) => String(link).includes("full-1h")
+      ? { ok: true, status: 200, segments: 600, duration: 3_600 }
+      : { ok: true, status: 200, segments: 170, duration: 1_020 }
+  });
+
+  const result = await service.createSession({}, {}, { movieId: "vlog-1", requestId: "req-vlog-1" });
+  assert.equal(result.session.decision.recommendedSourceId, "backup");
+  assert.ok(result.session.decision.reasonCodes.includes("longer-playlist-duration"));
+  assert.equal(result.session.sources.find((source) => source.id === "backup").health.duration, 3_600);
+  assert.deepEqual(calls.api, []);
 });
 
 test("任一账号已有直链时绝不购买", async () => {

@@ -4,7 +4,6 @@ import {
   createPlaybackSession,
   legacyResponseFromPlayback,
   normalizeFullDetail,
-  normalizeFullSummary,
   playableDetailReady,
   isLockedCoinVideo
 } from "../domain/playback.js";
@@ -61,19 +60,25 @@ function createPlaybackService(deps) {
 
   async function finish(env, ctx, options) {
     const { movieId, movieTitle, account, detail, mode, errors, attempts, purchase } = options;
-    const pendingSummary = {
+    // 返回会话前并行探测主备清单。若先按“主线优先”返回，短预览线会在后台
+    // 探测完成前被播放器锁定，正是 Vlog 17 分钟覆盖 1 小时完整版的根因。
+    const [primaryStat, backupStat] = await Promise.all([
+      statM3u8Quick(detail?.play_link, env),
+      statM3u8Quick(detail?.backup_link, env)
+    ]);
+    const probedSummary = {
       movieId,
       movieTitle,
       playLink: detail?.play_link,
       backupLink: detail?.backup_link,
-      fullStat: detail?.play_link ? { url: absoluteUrl(detail.play_link, env), pending: true } : null,
-      backupStat: detail?.backup_link ? { url: absoluteUrl(detail.backup_link, env), pending: true } : null
+      fullStat: primaryStat,
+      backupStat
     };
     const session = createPlaybackSession({
       movieId,
       movieTitle,
       detail,
-      summary: pendingSummary,
+      summary: probedSummary,
       account,
       acquisition: acquisition(mode, attempts, errors, purchase),
       absoluteUrl: (value) => absoluteUrl(value, env)
@@ -83,29 +88,16 @@ function createPlaybackService(deps) {
       accountId: account.id,
       movieId,
       ok: true,
-      meta: { mode, attempts, sessionId: session.id, sourceCount: session.sources.length }
+      meta: {
+        mode,
+        attempts,
+        sessionId: session.id,
+        sourceCount: session.sources.length,
+        recommendedSourceId: session.decision.recommendedSourceId,
+        primaryDuration: Number(primaryStat?.duration || 0),
+        backupDuration: Number(backupStat?.duration || 0)
+      }
     });
-
-    if (ctx?.waitUntil) {
-      ctx.waitUntil((async () => {
-        const [primaryStat, backupStat] = await Promise.all([
-          statM3u8Quick(detail?.play_link, env),
-          statM3u8Quick(detail?.backup_link, env)
-        ]);
-        const probed = createPlaybackSession({
-          movieId,
-          movieTitle,
-          detail,
-          summary: { ...pendingSummary, fullStat: primaryStat, backupStat },
-          account,
-          acquisition: session.acquisition,
-          absoluteUrl: (value) => absoluteUrl(value, env),
-          sessionId: session.id,
-          now: new Date(session.fetchedAt)
-        });
-        await cacheSet(env, account.id, movieId, detail, { schemaVersion: 2, session: probed });
-      })().catch(() => {}));
-    }
 
     return {
       ok: true,
@@ -184,23 +176,17 @@ function createPlaybackService(deps) {
       if (!body.forceRefresh) {
         const cached = await cacheGet(env, account.id, movieId);
         if (cached?.detail && playableDetailReady(cached.detail)) {
-          const cachedSession = cached.summary?.session
-            || createPlaybackSession({
-              movieId,
-              movieTitle,
-              detail: normalizeFullDetail(cached.detail),
-              summary: normalizeFullSummary(cached.summary, cached.detail),
-              account,
-              acquisition: acquisition("cache", errors.length + 1, errors),
-              absoluteUrl: (value) => absoluteUrl(value, env)
-            });
-          return {
-            ok: true,
-            session: { ...cachedSession, acquisition: acquisition("cache", errors.length + 1, errors) },
+          // 缓存只跳过账号/详情请求，线路覆盖时长仍需重新探测；旧缓存可能保存了
+          // “短主线优先”的决定，直接复用会让问题持续到缓存过期。
+          return finish(env, ctx, {
+            movieId,
+            movieTitle: movieTitle || cached.summary?.session?.title || cached.summary?.movieTitle || "",
+            account,
             detail: normalizeFullDetail(cached.detail),
-            account: publicAccount(account),
-            state: { accountPool: await listAccounts(env), selectedFullAccountId: account.id }
-          };
+            mode: "cache",
+            errors,
+            attempts: errors.length + 1
+          });
         }
       }
 

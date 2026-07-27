@@ -24,7 +24,7 @@ const JSON_HEADERS = {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BUILD_TAG = "txzz-worker-20260727-0100";
+const BUILD_TAG = "txzz-worker-20260727-0851";
 const REQUIRED_SECRET_KEYS = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -790,25 +790,107 @@ async function releasePurchaseLock(env, movieId, owner) {
   );
 }
 
-async function statM3u8Quick(link, env, timeoutMs = 2500) {
+function hlsDurations(text = "") {
+  return [...String(text).matchAll(/#EXTINF:([0-9.]+)/g)]
+    .map((match) => Number(match[1]))
+    .filter(Number.isFinite);
+}
+
+function hlsVariantUrls(text = "", baseUrl = "") {
+  const lines = String(text).split(/\r?\n/).map((line) => line.trim());
+  const variants = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!lines[index].startsWith("#EXT-X-STREAM-INF")) continue;
+    const candidate = lines.slice(index + 1).find((line) => line && !line.startsWith("#"));
+    if (!candidate) continue;
+    try {
+      variants.push(new URL(candidate, baseUrl).href);
+    } catch (_) {}
+  }
+  return [...new Set(variants)].slice(0, 4);
+}
+
+function hlsProbeStat(url, status, responseOk, text, latencyMs) {
+  const durations = hlsDurations(text);
+  return {
+    url,
+    status,
+    ok: responseOk && durations.length > 0,
+    latencyMs,
+    segments: durations.length,
+    duration: Number(durations.reduce((sum, item) => sum + item, 0).toFixed(3)),
+    checkedAt: nowIso()
+  };
+}
+
+async function fetchPlaybackProbe(url, signal) {
+  const headers = {
+    accept: "application/vnd.apple.mpegurl, application/x-mpegURL, text/plain, */*;q=0.1",
+    // 无扩展名地址可能实际是 MP4；限制读取量，避免探测时下载整个视频。
+    range: "bytes=0-524287"
+  };
+  let response = await fetch(url, {
+    signal,
+    headers
+  });
+  // 少数 HLS 网关拒绝 Range；已知清单地址安全回退为普通小文本请求。
+  if (!response.ok && /m3u8|mpegurl/i.test(url)) {
+    await response.body?.cancel().catch(() => {});
+    response = await fetch(url, { signal, headers: { accept: headers.accept } });
+  }
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  const contentLength = Number(response.headers.get("content-length") || 0);
+  const urlLooksHls = /m3u8|mpegurl/i.test(url);
+  const definitelyLargeBinary = /video\/(?:mp4|webm|quicktime)|application\/mp4/.test(contentType)
+    || (response.status !== 206 && contentLength > 2 * 1024 * 1024 && !urlLooksHls);
+  if (definitelyLargeBinary) {
+    await response.body?.cancel().catch(() => {});
+    return { response, text: "" };
+  }
+  const text = await response.text();
+  return { response, text };
+}
+
+async function statM3u8Quick(link, env, timeoutMs = 4500) {
   if (!link) return null;
   const url = absoluteUrl(link, env);
   const startedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal });
-    const text = await response.text();
-    const durations = [...text.matchAll(/#EXTINF:([0-9.]+)/g)].map((match) => Number(match[1]));
-    return {
-      url,
-      status: response.status,
-      ok: response.ok && durations.length > 0,
-      latencyMs: Date.now() - startedAt,
-      segments: durations.length,
-      duration: Number(durations.reduce((sum, item) => sum + item, 0).toFixed(3)),
-      checkedAt: nowIso()
-    };
+    const { response, text } = await fetchPlaybackProbe(url, controller.signal);
+    const latencyMs = Date.now() - startedAt;
+    if (!String(text).includes("#EXTM3U")) {
+      return {
+        url,
+        status: response.status,
+        ok: response.ok,
+        latencyMs,
+        segments: 0,
+        duration: 0,
+        checkedAt: nowIso()
+      };
+    }
+    const direct = hlsProbeStat(url, response.status, response.ok, text, latencyMs);
+    if (direct.duration > 0) return direct;
+
+    // 主清单本身没有 EXTINF；并行探测变体清单并取覆盖时长最长者。
+    const variants = hlsVariantUrls(text, url);
+    const rows = await Promise.allSettled(variants.map(async (variantUrl) => {
+      const variant = await fetchPlaybackProbe(variantUrl, controller.signal);
+      return hlsProbeStat(
+        variantUrl,
+        variant.response.status,
+        variant.response.ok,
+        variant.text,
+        Date.now() - startedAt
+      );
+    }));
+    const best = rows
+      .filter((row) => row.status === "fulfilled")
+      .map((row) => row.value)
+      .sort((left, right) => right.duration - left.duration || right.segments - left.segments)[0];
+    return best ? { ...best, url, resolvedPlaylistUrl: best.url, masterPlaylist: true } : direct;
   } catch (err) {
     return {
       url,
@@ -1025,6 +1107,8 @@ export default {
 export {
   buildServiceDiagnostics,
   envReady,
+  hlsDurations,
+  hlsVariantUrls,
   isLockedCoinVideo,
   normalizeAccount,
   shortStableHash,

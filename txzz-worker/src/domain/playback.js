@@ -134,6 +134,39 @@ function playbackSourceScore(source = null) {
   return score;
 }
 
+function playbackSourceDuration(source = null) {
+  const duration = Number(source?.health?.duration || 0);
+  return Number.isFinite(duration) && duration > 0 ? duration : 0;
+}
+
+/**
+ * 主备线路都可访问时，播放清单覆盖时长比延迟更能代表“是否为完整版”。
+ * 仅在差值同时超过 90 秒和短线路的 8% 时判定，避免编码误差导致频繁改选。
+ */
+function isMeaningfullyLongerSource(candidate = null, baseline = null) {
+  const candidateDuration = playbackSourceDuration(candidate);
+  const baselineDuration = playbackSourceDuration(baseline);
+  if (!candidateDuration || !baselineDuration || candidateDuration <= baselineDuration) return false;
+  return candidateDuration - baselineDuration >= Math.max(90, baselineDuration * 0.08);
+}
+
+function comparePlaybackSources(left, right) {
+  const leftScore = playbackSourceScore(left);
+  const rightScore = playbackSourceScore(right);
+  const leftUsable = leftScore > -10000;
+  const rightUsable = rightScore > -10000;
+  if (leftUsable !== rightUsable) return leftUsable ? -1 : 1;
+  if (leftUsable && rightUsable) {
+    if (isMeaningfullyLongerSource(left, right)) return -1;
+    if (isMeaningfullyLongerSource(right, left)) return 1;
+  }
+  const scoreDiff = rightScore - leftScore;
+  if (scoreDiff) return scoreDiff;
+  if (left.id === "primary") return -1;
+  if (right.id === "primary") return 1;
+  return String(left.id).localeCompare(String(right.id));
+}
+
 function buildPlaybackSources(detail = {}, summary = {}, absoluteUrl = (value) => String(value || "")) {
   const normalized = normalizeFullDetail(detail) || {};
   const rows = [
@@ -152,13 +185,7 @@ function buildPlaybackSources(detail = {}, summary = {}, absoluteUrl = (value) =
 }
 
 function recommendedPlaybackSource(sources = []) {
-  return [...sources].sort((left, right) => {
-    const scoreDiff = playbackSourceScore(right) - playbackSourceScore(left);
-    if (scoreDiff) return scoreDiff;
-    if (left.id === "primary") return -1;
-    if (right.id === "primary") return 1;
-    return String(left.id).localeCompare(String(right.id));
-  })[0] || null;
+  return [...sources].sort(comparePlaybackSources)[0] || null;
 }
 
 function createPlaybackSession(options = {}) {
@@ -175,6 +202,9 @@ function createPlaybackSession(options = {}) {
   } = options;
   const sources = buildPlaybackSources(detail, summary, absoluteUrl);
   const recommended = recommendedPlaybackSource(sources);
+  const recommendedForCompleteness = Boolean(
+    recommended && sources.some((source) => source.id !== recommended.id && isMeaningfullyLongerSource(recommended, source))
+  );
   const fetchedAt = now.toISOString();
   return {
     id: sessionId,
@@ -185,7 +215,10 @@ function createPlaybackSession(options = {}) {
     decision: {
       recommendedSourceId: recommended?.id || sources[0]?.id || "",
       reasonCodes: recommended
-        ? [recommended.health.state === "healthy" ? "healthy-source" : "best-available-source"]
+        ? [
+          ...(recommendedForCompleteness ? ["longer-playlist-duration"] : []),
+          recommended.health.state === "healthy" ? "healthy-source" : "best-available-source"
+        ]
         : ["no-playable-source"],
       failoverAllowed: sources.length > 1
     },
@@ -240,7 +273,10 @@ export {
   normalizeFullSummary,
   playableDetailReady,
   playbackProtocol,
+  playbackSourceDuration,
   playbackSourceScore,
+  comparePlaybackSources,
+  isMeaningfullyLongerSource,
   recommendedPlaybackSource,
   sourceHealth
 };

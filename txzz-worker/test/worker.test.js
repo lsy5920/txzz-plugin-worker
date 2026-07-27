@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { buildServiceDiagnostics, isLockedCoinVideo, normalizeAccount, slug } from "../src/worker.js";
+import worker, {
+  buildServiceDiagnostics,
+  hlsDurations,
+  hlsVariantUrls,
+  isLockedCoinVideo,
+  normalizeAccount,
+  slug
+} from "../src/worker.js";
 import { BUILT_IN_ACCESS_TOKEN } from "../src/security.js";
 
 const completeEnv = {
@@ -19,6 +26,17 @@ test("中文账号会生成稳定且互不冲突的账号编号", () => {
   assert.notEqual(first.id, "full-");
   assert.match(first.id, /^full-u-[a-f0-9]{8}$/);
   assert.equal(slug("普通用户"), slug("普通用户"));
+});
+
+test("HLS 探测可统计媒体时长并解析主清单相对变体", () => {
+  assert.deepEqual(hlsDurations("#EXTM3U\n#EXTINF:6.5,\na.ts\n#EXTINF:7.25,\nb.ts"), [6.5, 7.25]);
+  assert.deepEqual(
+    hlsVariantUrls(
+      "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nlow/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2400000\n/high.m3u8",
+      "https://media.example/master/index.m3u8"
+    ),
+    ["https://media.example/master/low/index.m3u8", "https://media.example/high.m3u8"]
+  );
 });
 
 test("VIP 已返回播放链接时绝不进入金币购买流程", () => {
